@@ -25,7 +25,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["dmg", "nsis", "deb", "rpm"],
     "macOS": {
       "files": {
         "MacOS/libsteam_api.dylib": "target/release/libsteam_api.dylib"

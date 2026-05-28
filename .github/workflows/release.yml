@@ -28,12 +28,13 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
+            bundles: dmg
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            bundles: nsis
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            bundles: deb,rpm
 
     runs-on: ${{ matrix.os }}
 
@@ -68,7 +69,6 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            libfuse2 \
             patchelf
 
       - name: Install dependencies (macOS)
@@ -93,4 +93,4 @@ jobs:
             Check the assets below for installers and binaries for your platform.
           releaseDraft: false
           prerelease: false
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}

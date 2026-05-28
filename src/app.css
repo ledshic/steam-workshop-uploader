@@ -3,6 +3,13 @@
 /* Modern Tauri + dark tool aesthetic base styles */
 :root {
   color-scheme: dark;
+  --macos-titlebar-offset: 30px;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
 }
 
 body {

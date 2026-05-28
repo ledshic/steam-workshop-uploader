@@ -1,5 +1,7 @@
 # Steam Workshop Uploader
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A cross-platform desktop app (Windows / macOS / Linux) built with **Tauri v2 + Rust + Svelte 5** for uploading mods to the Steam Workshop using `steamcmd`.
 
 ## Features

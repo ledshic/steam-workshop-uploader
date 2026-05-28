@@ -8,7 +8,7 @@ use std::{
 use steamworks::{AppId, Client, FileType, PublishedFileId, PublishedFileVisibility, UpdateStatus};
 use tauri::Emitter;
 
-use crate::{UploadResult, WorkshopItem};
+use crate::{SteamClientStatus, UploadResult, WorkshopItem};
 
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
 const CALLBACK_TICK: Duration = Duration::from_millis(50);
@@ -27,6 +27,32 @@ pub fn try_init_steamworks(app_id: u32) -> Result<(Client, steamworks::SingleCli
             app_id, e
         )
     })
+}
+
+/// Returns Steam client availability plus current user details when Steamworks initializes.
+pub fn steam_client_status(app_id: u32) -> SteamClientStatus {
+    match try_init_steamworks(app_id) {
+        Ok((client, _single)) => {
+            let user = client.user();
+            let friends = client.friends();
+            SteamClientStatus {
+                available: true,
+                app_id,
+                steam_id: Some(user.steam_id().raw()),
+                persona_name: Some(friends.name()),
+                logged_on: Some(user.logged_on()),
+                error: None,
+            }
+        }
+        Err(error) => SteamClientStatus {
+            available: false,
+            app_id,
+            steam_id: None,
+            persona_name: None,
+            logged_on: None,
+            error: Some(error),
+        },
+    }
 }
 
 /// Uploads or updates a Workshop item using ISteamUGC.

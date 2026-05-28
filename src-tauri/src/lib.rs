@@ -28,6 +28,17 @@ pub struct UploadResult {
     pub method: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SteamClientStatus {
+    pub available: bool,
+    pub app_id: u32,
+    pub steam_id: Option<u64>,
+    pub persona_name: Option<String>,
+    pub logged_on: Option<bool>,
+    pub error: Option<String>,
+}
+
 /// Generate a Valve KeyValues .vdf file content for steamcmd workshop_build_item
 #[tauri::command]
 fn generate_workshop_vdf(item: WorkshopItem) -> Result<String, String> {
@@ -250,8 +261,8 @@ fn is_valid_steamcmd(path: String) -> bool {
 /// This succeeds when the Steam client is running and the user is logged in.
 #[cfg(feature = "steamworks-sdk")]
 #[tauri::command]
-fn check_steam_client_available(app_id: u32) -> bool {
-    steamworks::try_init_steamworks(app_id).is_ok()
+fn check_steam_client_status(app_id: u32) -> SteamClientStatus {
+    steamworks::steam_client_status(app_id)
 }
 
 /// Upload / update a workshop item using the Steamworks SDK.
@@ -288,7 +299,7 @@ pub fn run() {
             start_workshop_upload,
             is_valid_steamcmd,
             #[cfg(feature = "steamworks-sdk")]
-            check_steam_client_available,
+            check_steam_client_status,
             #[cfg(feature = "steamworks-sdk")]
             upload_via_steamworks,
         ])

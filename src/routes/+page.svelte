@@ -29,6 +29,15 @@
     method: UploadMethod;
   }
 
+  interface SteamClientStatus {
+    available: boolean;
+    appId: number;
+    steamId?: number;
+    personaName?: string;
+    loggedOn?: boolean;
+    error?: string;
+  }
+
   type UploadMethod = 'sdk' | 'steamcmd';
 
   // State
@@ -51,6 +60,8 @@
   let isUploading = $state(false);
   let uploadStatus = $state<'idle' | 'running' | 'success' | 'error'>('idle');
   let lastResult = $state<string | null>(null);
+  let steamClientStatus = $state<SteamClientStatus | null>(null);
+  let isCheckingSteamClient = $state(false);
 
   let showSettings = $state(false);
   let tagInput = $state('');
@@ -60,6 +71,7 @@
 
   const APP_PRESETS = [
     { id: 252490, name: 'Rust' },
+    { id: 294100, name: 'RimWorld' },
     { id: 107410, name: 'Arma 3' },
     { id: 221100, name: 'DayZ' },
     { id: 304930, name: 'Unturned' },
@@ -80,6 +92,7 @@
   let canUpload = $derived(
     isFormValid && !isUploading && (uploadMethod === 'sdk' || steamcmdPath.trim().length > 0)
   );
+  let selectedPreset = $derived(APP_PRESETS.find((preset) => preset.id === item.appId));
 
   // Helpers
   function addLog(line: string, stream: LogEntry['stream'] = 'info') {
@@ -117,10 +130,30 @@
     }
   }
 
-  function setPreset(preset: { id: number; name: string }) {
-    item.appId = preset.id;
+  function setPreset(appId: number) {
+    item.appId = appId;
+    const preset = APP_PRESETS.find((p) => p.id === appId);
     if (!item.title) {
-      item.title = `${preset.name} Mod`;
+      item.title = `${preset?.name ?? 'Steam'} Mod`;
+    }
+  }
+
+  async function refreshSteamClientStatus() {
+    if (uploadMethod !== 'sdk') return;
+
+    isCheckingSteamClient = true;
+    try {
+      steamClientStatus = await invoke<SteamClientStatus>('check_steam_client_status', {
+        appId: item.appId,
+      });
+    } catch (err: any) {
+      steamClientStatus = {
+        available: false,
+        appId: item.appId,
+        error: `Steamworks SDK status is unavailable: ${err}`,
+      };
+    } finally {
+      isCheckingSteamClient = false;
     }
   }
 
@@ -400,6 +433,12 @@
   });
 
   $effect(() => {
+    if (showSettings && uploadMethod === 'sdk') {
+      refreshSteamClientStatus();
+    }
+  });
+
+  $effect(() => {
     return () => {
       cleanupListeners();
     };
@@ -482,15 +521,32 @@
           <div class="text-xs px-2 py-1 bg-zinc-950 border border-zinc-800 rounded font-mono text-zinc-500">AppID</div>
         </div>
 
-        <div class="flex gap-3 items-center">
-          <input type="number" bind:value={item.appId} class="path-input w-32 text-lg font-medium" />
-          <div class="flex flex-wrap gap-1.5">
-            {#each APP_PRESETS as preset}
-              <button onclick={() => setPreset(preset)} class="preset-pill {item.appId === preset.id ? 'active' : ''}">
-                {preset.name}
-              </button>
-            {/each}
+        <div class="grid grid-cols-[minmax(0,1fr)_8rem] gap-3 items-end">
+          <div>
+            <label for="game-select" class="text-xs text-zinc-500 block mb-1.5">Game</label>
+            <select
+              id="game-select"
+              bind:value={item.appId}
+              onchange={(e) => setPreset(Number((e.currentTarget as HTMLSelectElement).value))}
+              class="path-input w-full text-sm bg-zinc-900"
+            >
+              {#each APP_PRESETS as preset}
+                <option value={preset.id}>{preset.name}</option>
+              {/each}
+            </select>
           </div>
+          <div>
+            <label for="app-id" class="text-xs text-zinc-500 block mb-1.5">App ID</label>
+            <input id="app-id" type="number" bind:value={item.appId} class="path-input w-full text-lg font-medium" />
+          </div>
+        </div>
+
+        <div class="mt-3 text-xs text-zinc-500">
+          {#if selectedPreset}
+            Selected preset: <span class="text-zinc-300">{selectedPreset.name}</span>
+          {:else}
+            Custom AppID
+          {/if}
         </div>
 
         <div class="mt-3">
@@ -682,6 +738,45 @@
             : 'Uses steamcmd credentials cached from a prior terminal login.'}
         </div>
       </div>
+
+      {#if uploadMethod === 'sdk'}
+        <div class="mb-6 rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
+          <div class="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <div class="text-sm font-medium text-zinc-300">Steam client</div>
+              <div class="text-xs text-zinc-500">Checked with AppID {item.appId}</div>
+            </div>
+            <button onclick={refreshSteamClientStatus} disabled={isCheckingSteamClient} class="btn-secondary text-xs py-1.5 px-3">
+              {isCheckingSteamClient ? 'Checking...' : 'Refresh'}
+            </button>
+          </div>
+
+          {#if steamClientStatus?.available}
+            <div class="flex items-center gap-2 text-sm text-emerald-400 mb-3">
+              <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              Steam client detected
+            </div>
+            <div class="grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
+              <span class="text-zinc-500">User</span>
+              <span class="truncate text-zinc-200">{steamClientStatus.personaName || 'Unknown'}</span>
+              <span class="text-zinc-500">Steam ID</span>
+              <span class="font-mono text-zinc-300">{steamClientStatus.steamId ?? 'Unknown'}</span>
+              <span class="text-zinc-500">Logged on</span>
+              <span class={steamClientStatus.loggedOn ? 'text-emerald-400' : 'text-amber-400'}>
+                {steamClientStatus.loggedOn ? 'Yes' : 'No'}
+              </span>
+            </div>
+          {:else if steamClientStatus}
+            <div class="flex items-center gap-2 text-sm text-amber-400 mb-2">
+              <span class="w-2 h-2 rounded-full bg-amber-400"></span>
+              Steam client not detected
+            </div>
+            <div class="text-xs text-zinc-500 whitespace-pre-line">{steamClientStatus.error}</div>
+          {:else}
+            <div class="text-xs text-zinc-500">Open settings or refresh to check the running Steam client.</div>
+          {/if}
+        </div>
+      {/if}
 
       {#if uploadMethod === 'steamcmd'}
         <div class="mb-6">

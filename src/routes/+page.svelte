@@ -23,6 +23,14 @@
     ts: string;
   }
 
+  interface UploadResult {
+    publishedFileId: number;
+    needsLegalAgreement: boolean;
+    method: UploadMethod;
+  }
+
+  type UploadMethod = 'sdk' | 'steamcmd';
+
   // State
   let item = $state<WorkshopItem>({
     appId: 252490,
@@ -37,6 +45,7 @@
   });
 
   let steamcmdPath = $state('');
+  let uploadMethod = $state<UploadMethod>('sdk');
   let generatedVdf = $state('');
   let logs = $state<LogEntry[]>([]);
   let isUploading = $state(false);
@@ -68,6 +77,9 @@
   );
 
   let logText = $derived(logs.map((l) => l.line).join('\n'));
+  let canUpload = $derived(
+    isFormValid && !isUploading && (uploadMethod === 'sdk' || steamcmdPath.trim().length > 0)
+  );
 
   // Helpers
   function addLog(line: string, stream: LogEntry['stream'] = 'info') {
@@ -124,19 +136,23 @@
     item.tags = item.tags.filter((t) => t !== tag);
   }
 
+  function buildUploadPayload() {
+    return {
+      appId: item.appId,
+      publishedFileId: item.publishedFileId || undefined,
+      contentFolder: item.contentFolder,
+      previewFile: item.previewFile || undefined,
+      title: item.title,
+      description: item.description,
+      changeNote: item.changeNote || undefined,
+      visibility: item.visibility,
+      tags: item.tags,
+    };
+  }
+
   async function generateVdf() {
     try {
-      const payload = {
-        appId: item.appId,
-        publishedFileId: item.publishedFileId || undefined,
-        contentFolder: item.contentFolder,
-        previewFile: item.previewFile || undefined,
-        title: item.title,
-        description: item.description,
-        changeNote: item.changeNote || undefined,
-        visibility: item.visibility,
-        tags: item.tags,
-      };
+      const payload = buildUploadPayload();
 
       const vdf = await invoke<string>('generate_workshop_vdf', { item: payload });
       generatedVdf = vdf;
@@ -151,7 +167,55 @@
     }
   }
 
-  async function startUpload() {
+  function cleanupListeners() {
+    if (unlistenLog) {
+      unlistenLog();
+      unlistenLog = null;
+    }
+    if (unlistenComplete) {
+      unlistenComplete();
+      unlistenComplete = null;
+    }
+  }
+
+  async function prepareUploadListeners() {
+    cleanupListeners();
+    unlistenLog = await listen<{ line: string; stream: string }>('workshop-log', (event) => {
+      const { line, stream } = event.payload;
+      addLog(line, stream as any);
+    });
+
+    unlistenComplete = await listen<{
+      success: boolean;
+      code: number | null;
+      method?: UploadMethod;
+      publishedFileId?: number;
+      needsLegalAgreement?: boolean;
+    }>('workshop-complete', (event) => {
+      const { success, code, method, publishedFileId, needsLegalAgreement } = event.payload;
+      isUploading = false;
+      uploadStatus = success ? 'success' : 'error';
+
+      if (success && method === 'sdk' && publishedFileId) {
+        item.publishedFileId = publishedFileId;
+        lastResult = needsLegalAgreement
+          ? `SDK upload completed. PublishedFileID: ${publishedFileId}. Accept the Workshop legal agreement in Steam.`
+          : `SDK upload completed. PublishedFileID: ${publishedFileId}`;
+      } else {
+        lastResult = success
+          ? 'Upload completed successfully!'
+          : `Upload failed (exit code ${code ?? 'unknown'})`;
+      }
+
+      addLog(
+        success ? 'Upload finished successfully.' : `Upload failed with code ${code}`,
+        success ? 'info' : 'stderr'
+      );
+      cleanupListeners();
+    });
+  }
+
+  async function startSteamcmdUpload() {
     if (!steamcmdPath) {
       alert('Please set the path to steamcmd in Settings first.');
       showSettings = true;
@@ -167,48 +231,15 @@
       return;
     }
 
-    if (unlistenLog) unlistenLog();
-    if (unlistenComplete) unlistenComplete();
-
     logs = [];
     isUploading = true;
     uploadStatus = 'running';
     lastResult = null;
 
-    addLog('Starting Steam Workshop upload...', 'info');
+    addLog('Starting Steam Workshop upload via steamcmd...', 'info');
 
     try {
-      unlistenLog = await listen<{ line: string; stream: string }>('workshop-log', (event) => {
-        const { line, stream } = event.payload;
-        addLog(line, stream as any);
-      });
-
-      unlistenComplete = await listen<{ success: boolean; code: number | null }>(
-        'workshop-complete',
-        (event) => {
-          const { success, code } = event.payload;
-          isUploading = false;
-          uploadStatus = success ? 'success' : 'error';
-          lastResult = success
-            ? 'Upload completed successfully!'
-            : `Upload failed (exit code ${code ?? 'unknown'})`;
-
-          addLog(
-            success ? '✅ Upload finished successfully.' : `❌ Upload failed with code ${code}`,
-            'info'
-          );
-
-          if (unlistenLog) {
-            unlistenLog();
-            unlistenLog = null;
-          }
-          if (unlistenComplete) {
-            unlistenComplete();
-            unlistenComplete = null;
-          }
-        }
-      );
-
+      await prepareUploadListeners();
       await invoke('start_workshop_upload', {
         steamcmdPath,
         vdfPath,
@@ -217,7 +248,45 @@
       isUploading = false;
       uploadStatus = 'error';
       addLog(`Failed to start upload: ${err}`, 'stderr');
+      cleanupListeners();
       alert(`Upload error: ${err}`);
+    }
+  }
+
+  async function startSdkUpload() {
+    logs = [];
+    isUploading = true;
+    uploadStatus = 'running';
+    lastResult = null;
+
+    addLog('Starting Steam Workshop upload via Steamworks SDK...', 'info');
+
+    try {
+      await prepareUploadListeners();
+      const result = await invoke<UploadResult>('upload_via_steamworks', {
+        item: buildUploadPayload(),
+      });
+
+      isUploading = false;
+      item.publishedFileId = result.publishedFileId;
+      uploadStatus = 'success';
+      lastResult = result.needsLegalAgreement
+        ? `SDK upload completed. PublishedFileID: ${result.publishedFileId}. Accept the Workshop legal agreement in Steam.`
+        : `SDK upload completed. PublishedFileID: ${result.publishedFileId}`;
+    } catch (err: any) {
+      isUploading = false;
+      uploadStatus = 'error';
+      addLog(`SDK upload failed: ${err}`, 'stderr');
+      cleanupListeners();
+      alert(`SDK upload error: ${err}`);
+    }
+  }
+
+  async function startUpload() {
+    if (uploadMethod === 'sdk') {
+      await startSdkUpload();
+    } else {
+      await startSteamcmdUpload();
     }
   }
 
@@ -305,7 +374,7 @@
   function handleKeydown(e: KeyboardEvent) {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'enter' && isFormValid && !isUploading) {
       e.preventDefault();
-      if (generatedVdf) {
+      if (uploadMethod === 'sdk' || generatedVdf) {
         startUpload();
       } else {
         generateVdf().then(() => startUpload());
@@ -316,6 +385,10 @@
   $effect(() => {
     const saved = localStorage.getItem('steamcmdPath');
     if (saved) steamcmdPath = saved;
+    const savedMethod = localStorage.getItem('uploadMethod');
+    if (savedMethod === 'sdk' || savedMethod === 'steamcmd') {
+      uploadMethod = savedMethod;
+    }
   });
 
   $effect(() => {
@@ -323,9 +396,12 @@
   });
 
   $effect(() => {
+    localStorage.setItem('uploadMethod', uploadMethod);
+  });
+
+  $effect(() => {
     return () => {
-      if (unlistenLog) unlistenLog();
-      if (unlistenComplete) unlistenComplete();
+      cleanupListeners();
     };
   });
 
@@ -379,7 +455,10 @@
       <span class="font-semibold">Steam Workshop Uploader</span>
     </div>
     <div class="flex items-center gap-2">
-      {#if steamcmdPath}
+      <div class="px-3 py-0.5 text-xs bg-zinc-900 border border-zinc-700 rounded-full text-blue-400 flex items-center gap-1.5">
+        <span class="w-1.5 h-1.5 bg-blue-400 rounded-full"></span> {uploadMethod === 'sdk' ? 'SDK default' : 'steamcmd mode'}
+      </div>
+      {#if uploadMethod === 'steamcmd' && steamcmdPath}
         <div class="px-3 py-0.5 text-xs bg-zinc-900 border border-zinc-700 rounded-full text-emerald-400 flex items-center gap-1.5">
           <span class="w-1.5 h-1.5 bg-emerald-400 rounded-full"></span> steamcmd ready
         </div>
@@ -415,25 +494,25 @@
         </div>
 
         <div class="mt-3">
-          <label class="text-xs text-zinc-500 block mb-1.5">Published File ID (for updates)</label>
-          <input type="number" placeholder="Leave empty for new upload" bind:value={item.publishedFileId} class="path-input w-full" />
+          <label for="published-file-id" class="text-xs text-zinc-500 block mb-1.5">Published File ID (for updates)</label>
+          <input id="published-file-id" type="number" placeholder="Leave empty for new upload" bind:value={item.publishedFileId} class="path-input w-full" />
         </div>
       </div>
 
       <!-- Content -->
-      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 {isDragging ? 'ring-2 ring-blue-500 border-blue-500/60' : ''}"
+      <div role="region" aria-label="Content folder drop zone" class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 {isDragging ? 'ring-2 ring-blue-500 border-blue-500/60' : ''}"
            ondragover={(e) => { e.preventDefault(); isDragging = true; }}
            ondragleave={() => isDragging = false}
            ondrop={(e) => { e.preventDefault(); handleDrop(e); }}>
         <div class="text-sm font-semibold text-zinc-400 tracking-wider mb-3">CONTENT FOLDER</div>
         
-        <div onclick={selectContentFolder} class="group border border-dashed border-zinc-700 hover:border-zinc-500 rounded-2xl p-7 flex flex-col items-center justify-center cursor-pointer transition-all bg-zinc-950/60 hover:bg-zinc-950 active:scale-[0.995]">
+        <button type="button" onclick={selectContentFolder} class="group w-full border border-dashed border-zinc-700 hover:border-zinc-500 rounded-2xl p-7 flex flex-col items-center justify-center cursor-pointer transition-all bg-zinc-950/60 hover:bg-zinc-950 active:scale-[0.995]">
           <div class="w-10 h-10 rounded-2xl bg-zinc-800 group-hover:bg-zinc-700 flex items-center justify-center mb-3">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
           </div>
           <div class="font-medium text-sm">Drop folder here or click to browse</div>
           <div class="text-xs text-zinc-500 mt-1">All files inside this folder will be uploaded</div>
-        </div>
+        </button>
 
         {#if item.contentFolder}
           <div class="mt-3 text-xs font-mono bg-zinc-950 border border-emerald-900/60 text-emerald-400 rounded-xl px-4 py-2 truncate">{item.contentFolder}</div>
@@ -501,6 +580,7 @@
           <div class="uppercase text-xs font-semibold tracking-widest text-zinc-500 mb-4">Review</div>
           <div class="space-y-[13px] text-sm">
             <div class="flex justify-between"><span class="text-zinc-400">App ID</span><span class="font-mono">{item.appId}</span></div>
+            <div class="flex justify-between"><span class="text-zinc-400">Method</span><span>{uploadMethod === 'sdk' ? 'Steamworks SDK' : 'steamcmd'}</span></div>
             <div class="flex justify-between"><span class="text-zinc-400">Title</span><span class="truncate max-w-[180px] text-right">{item.title || '—'}</span></div>
             <div class="flex justify-between"><span class="text-zinc-400">Visibility</span><span>{VISIBILITY_LABELS[item.visibility]}</span></div>
             <div class="flex justify-between"><span class="text-zinc-400">Content</span><span>{item.contentFolder ? 'Ready' : '—'}</span></div>
@@ -508,18 +588,20 @@
         </div>
 
         <div class="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-3">
-          <button onclick={generateVdf} disabled={!isFormValid || isUploading} class="w-full py-[13px] font-semibold rounded-2xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 disabled:opacity-50 transition active:scale-[0.985]">
-            Generate workshop.vdf
-          </button>
+          {#if uploadMethod === 'steamcmd'}
+            <button onclick={generateVdf} disabled={!isFormValid || isUploading} class="w-full py-[13px] font-semibold rounded-2xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 disabled:opacity-50 transition active:scale-[0.985]">
+              Generate workshop.vdf
+            </button>
+          {/if}
 
-          <button onclick={startUpload} disabled={!isFormValid || isUploading || !steamcmdPath} class="btn-primary py-4 text-[15px]">
+          <button onclick={startUpload} disabled={!canUpload} class="btn-primary py-4 text-[15px]">
             {#if isUploading}
               <span class="inline-flex items-center gap-2">
                 <span class="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
                 Uploading…
               </span>
             {:else}
-              ↑ Upload to Steam Workshop
+              ↑ Upload with {uploadMethod === 'sdk' ? 'Steamworks SDK' : 'steamcmd'}
             {/if}
           </button>
           <div class="text-center text-[10px] text-zinc-500">⌘ + Enter</div>
@@ -568,7 +650,7 @@
 
       <div class="h-56 bg-black/50 border border-zinc-800 rounded-2xl mb-6 overflow-hidden font-mono text-sm">
         {#if filteredLogs.length === 0}
-          <div class="h-full flex items-center justify-center text-zinc-500 text-xs">SteamCMD output will stream here during upload</div>
+          <div class="h-full flex items-center justify-center text-zinc-500 text-xs">Upload output will stream here</div>
         {:else}
           <div class="overflow-auto h-full p-2 text-xs leading-[1.35]">
             {#each filteredLogs as entry}
@@ -583,21 +665,38 @@
 
 <!-- Settings Modal -->
 {#if showSettings}
-  <div class="fixed inset-0 bg-black/80 flex items-center justify-center z-[200]" onclick={() => (showSettings = false)}>
-    <div onclick={(e) => e.stopPropagation()} class="w-full max-w-md bg-zinc-900 border border-zinc-700 rounded-3xl p-7">
-      <div class="text-xl font-semibold mb-5">Settings</div>
+  <div class="fixed inset-0 z-[200] flex items-center justify-center pointer-events-none">
+    <button type="button" aria-label="Close settings" class="absolute inset-0 bg-black/80 pointer-events-auto" onclick={() => (showSettings = false)}></button>
+    <div role="dialog" aria-modal="true" aria-labelledby="settings-title" class="relative pointer-events-auto w-full max-w-md bg-zinc-900 border border-zinc-700 rounded-3xl p-7">
+      <div id="settings-title" class="text-xl font-semibold mb-5">Settings</div>
 
       <div class="mb-6">
-        <label class="block text-sm text-zinc-400 mb-1.5">steamcmd path</label>
-        <div class="flex gap-2">
-          <input bind:value={steamcmdPath} class="path-input flex-1" placeholder="steamcmd.sh or steamcmd.exe" />
-          <button onclick={browseForSteamcmd} class="btn-secondary">Browse</button>
+        <div class="block text-sm text-zinc-400 mb-1.5">Upload method</div>
+        <div class="segmented w-full">
+          <button onclick={() => uploadMethod = 'sdk'} class:active={uploadMethod === 'sdk'}>Steamworks SDK</button>
+          <button onclick={() => uploadMethod = 'steamcmd'} class:active={uploadMethod === 'steamcmd'}>steamcmd</button>
+        </div>
+        <div class="mt-2 text-xs text-zinc-500">
+          {uploadMethod === 'sdk'
+            ? 'Uses the running Steam client session. Steam must be open and logged in.'
+            : 'Uses steamcmd credentials cached from a prior terminal login.'}
         </div>
       </div>
 
-      <div class="text-xs text-zinc-400 border-t border-zinc-800 pt-5">
-        Run <span class="font-mono text-amber-400">steamcmd +login YOUR_USERNAME</span> once in your terminal to cache credentials.
-      </div>
+      {#if uploadMethod === 'steamcmd'}
+        <div class="mb-6">
+          <label for="steamcmd-path" class="block text-sm text-zinc-400 mb-1.5">steamcmd path</label>
+          <div class="flex gap-2">
+            <input id="steamcmd-path" bind:value={steamcmdPath} class="path-input flex-1" placeholder="steamcmd.sh or steamcmd.exe" />
+            <button onclick={browseForSteamcmd} class="btn-secondary">Browse</button>
+          </div>
+          <button onclick={autoDetectSteamcmd} class="btn-secondary mt-2 text-xs">Auto-detect steamcmd</button>
+        </div>
+
+        <div class="text-xs text-zinc-400 border-t border-zinc-800 pt-5">
+          For steamcmd fallback, run <span class="font-mono text-amber-400">steamcmd +login YOUR_USERNAME</span> once in your terminal to cache credentials.
+        </div>
+      {/if}
 
       <div class="mt-6 flex justify-end gap-3">
         <button onclick={() => (showSettings = false)} class="btn-secondary px-6">Close</button>

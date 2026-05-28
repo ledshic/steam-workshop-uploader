@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tauri::{Emitter, Manager};
-use tauri_plugin_shell::{ShellExt, process::CommandEvent};
+use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 
 #[cfg(feature = "steamworks-sdk")]
 mod steamworks;
@@ -18,6 +18,14 @@ pub struct WorkshopItem {
     pub change_note: Option<String>,
     pub visibility: u8,
     pub tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadResult {
+    pub published_file_id: u64,
+    pub needs_legal_agreement: bool,
+    pub method: String,
 }
 
 /// Generate a Valve KeyValues .vdf file content for steamcmd workshop_build_item
@@ -41,21 +49,36 @@ fn generate_workshop_vdf(item: WorkshopItem) -> Result<String, String> {
 
     vdf.push_str(&format!("\t\"appid\"\t\t\t\"{}\"\n", item.app_id));
     vdf.push_str(&format!("\t\"publishedfileid\"\t\"{}\"\n", published));
-    vdf.push_str(&format!("\t\"contentfolder\"\t\"{}\"\n", escape_vdf_path(&item.content_folder)));
+    vdf.push_str(&format!(
+        "\t\"contentfolder\"\t\"{}\"\n",
+        escape_vdf_path(&item.content_folder)
+    ));
 
     if let Some(preview) = &item.preview_file {
         if !preview.trim().is_empty() {
-            vdf.push_str(&format!("\t\"previewfile\"\t\"{}\"\n", escape_vdf_path(preview)));
+            vdf.push_str(&format!(
+                "\t\"previewfile\"\t\"{}\"\n",
+                escape_vdf_path(preview)
+            ));
         }
     }
 
-    vdf.push_str(&format!("\t\"title\"\t\t\t\"{}\"\n", escape_vdf_string(&item.title)));
-    vdf.push_str(&format!("\t\"description\"\t\t\"{}\"\n", escape_vdf_string(&item.description)));
+    vdf.push_str(&format!(
+        "\t\"title\"\t\t\t\"{}\"\n",
+        escape_vdf_string(&item.title)
+    ));
+    vdf.push_str(&format!(
+        "\t\"description\"\t\t\"{}\"\n",
+        escape_vdf_string(&item.description)
+    ));
     vdf.push_str(&format!("\t\"visibility\"\t\t\"{}\"\n", visibility));
 
     if let Some(note) = &item.change_note {
         if !note.trim().is_empty() {
-            vdf.push_str(&format!("\t\"changenote\"\t\t\"{}\"\n", escape_vdf_string(note)));
+            vdf.push_str(&format!(
+                "\t\"changenote\"\t\t\"{}\"\n",
+                escape_vdf_string(note)
+            ));
         }
     }
 
@@ -63,7 +86,11 @@ fn generate_workshop_vdf(item: WorkshopItem) -> Result<String, String> {
         vdf.push_str("\t\"tags\"\n\t{\n");
         for (i, tag) in item.tags.iter().enumerate() {
             if !tag.trim().is_empty() {
-                vdf.push_str(&format!("\t\t\"{}\"\t\t\"{}\"\n", i, escape_vdf_string(tag)));
+                vdf.push_str(&format!(
+                    "\t\t\"{}\"\t\t\"{}\"\n",
+                    i,
+                    escape_vdf_string(tag)
+                ));
             }
         }
         vdf.push_str("\t}\n");
@@ -89,10 +116,13 @@ fn escape_vdf_path(p: &str) -> String {
 #[tauri::command]
 async fn write_temp_vdf(app: tauri::AppHandle, content: String) -> Result<String, String> {
     let temp_dir = app.path().temp_dir().map_err(|e| e.to_string())?;
-    let vdf_path = temp_dir.join(format!("workshop_item_{}.vdf", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis()));
+    let vdf_path = temp_dir.join(format!(
+        "workshop_item_{}.vdf",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    ));
 
     std::fs::write(&vdf_path, content).map_err(|e| e.to_string())?;
     Ok(vdf_path.to_string_lossy().to_string())
@@ -128,10 +158,14 @@ async fn start_workshop_upload(
         "+quit".to_string(),
     ];
 
-    app.emit("workshop-log", serde_json::json!({
-        "line": format!("> {} {}", cmd_name, args.join(" ")),
-        "stream": "info"
-    })).ok();
+    app.emit(
+        "workshop-log",
+        serde_json::json!({
+            "line": format!("> {} {}", cmd_name, args.join(" ")),
+            "stream": "info"
+        }),
+    )
+    .ok();
 
     let shell = app.shell();
     let (mut rx, _child) = shell
@@ -149,10 +183,13 @@ async fn start_workshop_upload(
                     let text = String::from_utf8_lossy(&line);
                     for l in text.lines() {
                         if !l.trim().is_empty() {
-                            let _ = app_clone.emit("workshop-log", serde_json::json!({
-                                "line": l,
-                                "stream": "stdout"
-                            }));
+                            let _ = app_clone.emit(
+                                "workshop-log",
+                                serde_json::json!({
+                                    "line": l,
+                                    "stream": "stdout"
+                                }),
+                            );
                         }
                     }
                 }
@@ -160,25 +197,34 @@ async fn start_workshop_upload(
                     let text = String::from_utf8_lossy(&line);
                     for l in text.lines() {
                         if !l.trim().is_empty() {
-                            let _ = app_clone.emit("workshop-log", serde_json::json!({
-                                "line": l,
-                                "stream": "stderr"
-                            }));
+                            let _ = app_clone.emit(
+                                "workshop-log",
+                                serde_json::json!({
+                                    "line": l,
+                                    "stream": "stderr"
+                                }),
+                            );
                         }
                     }
                 }
                 CommandEvent::Error(err) => {
-                    let _ = app_clone.emit("workshop-log", serde_json::json!({
-                        "line": format!("ERROR: {}", err),
-                        "stream": "stderr"
-                    }));
+                    let _ = app_clone.emit(
+                        "workshop-log",
+                        serde_json::json!({
+                            "line": format!("ERROR: {}", err),
+                            "stream": "stderr"
+                        }),
+                    );
                 }
                 CommandEvent::Terminated(payload) => {
                     let success = payload.code.map_or(false, |c| c == 0);
-                    let _ = app_clone.emit("workshop-complete", serde_json::json!({
-                        "success": success,
-                        "code": payload.code
-                    }));
+                    let _ = app_clone.emit(
+                        "workshop-complete",
+                        serde_json::json!({
+                            "success": success,
+                            "code": payload.code
+                        }),
+                    );
                     break;
                 }
                 _ => {}
@@ -215,13 +261,11 @@ fn check_steam_client_available(app_id: u32) -> bool {
 async fn upload_via_steamworks(
     app: tauri::AppHandle,
     item: WorkshopItem,
-) -> Result<String, String> {
+) -> Result<UploadResult, String> {
     // Run the blocking Steamworks logic in a blocking task
-    tauri::async_runtime::spawn_blocking(move || {
-        steamworks::upload_item_via_steamworks(app, item)
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    tauri::async_runtime::spawn_blocking(move || steamworks::upload_item_via_steamworks(app, item))
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
 }
 
 #[tauri::command]

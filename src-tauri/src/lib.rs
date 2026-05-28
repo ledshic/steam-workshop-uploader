@@ -3,6 +3,9 @@ use std::path::Path;
 use tauri::{Emitter, Manager};
 use tauri_plugin_shell::{ShellExt, process::CommandEvent};
 
+#[cfg(feature = "steamworks-sdk")]
+mod steamworks;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkshopItem {
@@ -197,6 +200,30 @@ fn is_valid_steamcmd(path: String) -> bool {
     name.contains("steamcmd")
 }
 
+/// Check if we can initialize Steamworks for the given AppID.
+/// This succeeds when the Steam client is running and the user is logged in.
+#[cfg(feature = "steamworks-sdk")]
+#[tauri::command]
+fn check_steam_client_available(app_id: u32) -> bool {
+    steamworks::try_init_steamworks(app_id).is_ok()
+}
+
+/// Upload / update a workshop item using the Steamworks SDK.
+/// The user must have the Steam client running and logged in.
+#[cfg(feature = "steamworks-sdk")]
+#[tauri::command]
+async fn upload_via_steamworks(
+    app: tauri::AppHandle,
+    item: WorkshopItem,
+) -> Result<String, String> {
+    // Run the blocking Steamworks logic in a blocking task
+    tauri::async_runtime::spawn_blocking(move || {
+        steamworks::upload_item_via_steamworks(app, item)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
@@ -215,7 +242,11 @@ pub fn run() {
             generate_workshop_vdf,
             write_temp_vdf,
             start_workshop_upload,
-            is_valid_steamcmd
+            is_valid_steamcmd,
+            #[cfg(feature = "steamworks-sdk")]
+            check_steam_client_available,
+            #[cfg(feature = "steamworks-sdk")]
+            upload_via_steamworks,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

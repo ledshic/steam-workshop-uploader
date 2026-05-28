@@ -1,0 +1,116 @@
+@import "tailwindcss";
+
+/* Modern Tauri + dark tool aesthetic base styles */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-zinc-950 text-zinc-200;
+  font-feature-settings: "tnum" "cv02" "cv03";
+}
+
+/* Nice thin scrollbars for the tool feel */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+}
+
+/* Selection */
+::selection {
+  background-color: #3b82f6;
+  color: white;
+}
+
+/* Focus ring consistency for modern feel */
+input:focus-visible,
+textarea:focus-visible,
+button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px theme(colors.blue.500 / 40%);
+}
+
+/* Monospace for paths, logs, VDF */
+.mono,
+code,
+pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+/* Subtle card hover lift used in a few places */
+.card-hover {
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+}
+.card-hover:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+}
+
+/* Log line styling */
+.log-line {
+  @apply py-px px-2 rounded hover:bg-zinc-900 transition-colors;
+}
+.log-line[data-stream="stderr"] { @apply text-red-400; }
+.log-line[data-stream="info"] { @apply text-blue-400; }
+
+/* Modern pill buttons for presets */
+.preset-pill {
+  @apply px-3 py-1 text-xs font-medium rounded-full border transition-all active:scale-[0.985];
+  @apply border-zinc-700 bg-zinc-900 hover:bg-zinc-800 hover:border-zinc-600;
+}
+.preset-pill.active {
+  @apply bg-blue-500 text-white border-blue-500;
+}
+
+/* Segmented control for visibility */
+.segmented {
+  @apply inline-flex rounded-lg border border-zinc-700 bg-zinc-900 p-0.5;
+}
+.segmented button {
+  @apply px-3.5 py-1 text-sm rounded-md transition-all;
+}
+.segmented button.active {
+  @apply bg-zinc-800 text-white shadow-sm;
+}
+
+/* Tag chips */
+.tag-chip {
+  @apply inline-flex items-center gap-1.5 pl-3 pr-1.5 py-0.5 text-sm rounded-full 
+         bg-zinc-800 border border-zinc-700 text-zinc-300;
+}
+.tag-chip button {
+  @apply w-4 h-4 flex items-center justify-center rounded-full hover:bg-zinc-700 transition-colors;
+}
+
+/* Big primary action button */
+.btn-primary {
+  @apply w-full flex items-center justify-center gap-2 px-5 py-3 text-base font-semibold
+         bg-blue-600 hover:bg-blue-500 active:bg-blue-700 rounded-xl transition-all
+         disabled:opacity-60 disabled:cursor-not-allowed shadow-lg shadow-blue-950/50;
+}
+
+.btn-secondary {
+  @apply px-4 py-2 text-sm font-medium bg-zinc-800 hover:bg-zinc-700 border border-zinc-700
+         rounded-lg transition-colors active:bg-zinc-800;
+}
+
+/* File path input style */
+.path-input {
+  @apply font-mono text-sm bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 
+         text-zinc-400 placeholder:text-zinc-600 focus:border-blue-500/60;
+}
+
+/* Status badges */
+.status-badge {
+  @apply inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full;
+}

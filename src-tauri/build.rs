@@ -32,7 +32,7 @@ fn copy_steam_api_dylib() {
 
     for entry in entries.flatten() {
         let path = entry.path().join("out").join("libsteam_api.dylib");
-        if path.exists() {
+        if path.exists() && steam_api_dylib_supports_current_crate(&path) {
             let destination = profile_dir.join("libsteam_api.dylib");
             if let Err(err) = fs::copy(&path, &destination) {
                 println!(
@@ -68,9 +68,18 @@ fn copy_steam_api_dylib() {
     }
 
     println!(
-        "cargo:warning=libsteam_api.dylib was not found under {}",
+        "cargo:warning=compatible libsteam_api.dylib was not found under {}",
         build_dir.display()
     );
+}
+
+#[cfg(target_os = "macos")]
+fn steam_api_dylib_supports_current_crate(path: &std::path::Path) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| {
+        bytes
+            .windows(b"SteamAPI_InitFlat".len())
+            .any(|window| window == b"SteamAPI_InitFlat")
+    })
 }
 
 #[cfg(not(target_os = "macos"))]

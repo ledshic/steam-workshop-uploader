@@ -1,10 +1,17 @@
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 
 #[cfg(feature = "steamworks-sdk")]
 mod steamworks;
+
+const STEAM_STATUS_PROBE_ARG: &str = "--steam-status-probe";
+const STEAM_STATUS_PROBE_TIMEOUT: Duration = Duration::from_secs(6);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +33,44 @@ pub struct UploadResult {
     pub published_file_id: u64,
     pub needs_legal_agreement: bool,
     pub method: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DescriptionUpdateRequest {
+    pub app_id: u32,
+    pub published_file_id: u64,
+    pub description: String,
+    pub language: Option<String>,
+    pub change_note: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewUpdateRequest {
+    pub app_id: u32,
+    pub published_file_id: u64,
+    pub preview_file: String,
+    pub change_note: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryWorkshopItemRequest {
+    pub app_id: u32,
+    pub published_file_id: u64,
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct QueriedWorkshopItem {
+    pub app_id: u32,
+    pub published_file_id: u64,
+    pub title: String,
+    pub description: String,
+    pub visibility: u8,
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -262,7 +307,173 @@ fn is_valid_steamcmd(path: String) -> bool {
 #[cfg(feature = "steamworks-sdk")]
 #[tauri::command]
 fn check_steam_client_status(app_id: u32) -> SteamClientStatus {
-    steamworks::steam_client_status(app_id)
+    probe_steam_client_status_in_child(app_id)
+}
+
+#[cfg(feature = "steamworks-sdk")]
+fn probe_steam_client_status_in_child(app_id: u32) -> SteamClientStatus {
+    if app_id == 0 {
+        return SteamClientStatus {
+            available: false,
+            app_id,
+            steam_id: None,
+            persona_name: None,
+            logged_on: None,
+            error: Some("App ID must be greater than 0".to_string()),
+        };
+    }
+
+    let exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(e) => {
+            return SteamClientStatus {
+                available: false,
+                app_id,
+                steam_id: None,
+                persona_name: None,
+                logged_on: None,
+                error: Some(format!("Could not locate executable for status probe: {}", e)),
+            }
+        }
+    };
+
+    let mut child = match Command::new(exe)
+        .arg(STEAM_STATUS_PROBE_ARG)
+        .arg(app_id.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            return SteamClientStatus {
+                available: false,
+                app_id,
+                steam_id: None,
+                persona_name: None,
+                logged_on: None,
+                error: Some(format!("Could not spawn status probe process: {}", e)),
+            }
+        }
+    };
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if started.elapsed() > STEAM_STATUS_PROBE_TIMEOUT {
+                    let _ = child.kill();
+                    break Err("Status probe timed out".to_string());
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => break Err(format!("Status probe wait failed: {}", e)),
+        }
+    };
+
+    let mut stdout = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut stdout);
+    }
+
+    let mut stderr = String::new();
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut stderr);
+    }
+
+    match status {
+        Ok(exit) => {
+            if !exit.success() {
+                return SteamClientStatus {
+                    available: false,
+                    app_id,
+                    steam_id: None,
+                    persona_name: None,
+                    logged_on: None,
+                    error: Some(if stderr.trim().is_empty() {
+                        format!("Status probe exited with code {:?}", exit.code())
+                    } else {
+                        format!("Status probe exited with code {:?}: {}", exit.code(), stderr.trim())
+                    }),
+                };
+            }
+
+            match serde_json::from_str::<SteamClientStatus>(stdout.trim()) {
+                Ok(mut parsed) => {
+                    if parsed.app_id == 0 {
+                        parsed.app_id = app_id;
+                    }
+                    parsed
+                }
+                Err(e) => SteamClientStatus {
+                    available: false,
+                    app_id,
+                    steam_id: None,
+                    persona_name: None,
+                    logged_on: None,
+                    error: Some(format!(
+                        "Status probe returned invalid JSON: {}{}",
+                        e,
+                        if stdout.trim().is_empty() {
+                            "".to_string()
+                        } else {
+                            format!(". Raw output: {}", stdout.trim())
+                        }
+                    )),
+                },
+            }
+        }
+        Err(err) => SteamClientStatus {
+            available: false,
+            app_id,
+            steam_id: None,
+            persona_name: None,
+            logged_on: None,
+            error: Some(err),
+        },
+    }
+}
+
+#[cfg(feature = "steamworks-sdk")]
+pub fn try_handle_steam_status_probe_process() -> bool {
+    let mut args = std::env::args();
+    let _ = args.next();
+    if args.next().as_deref() != Some(STEAM_STATUS_PROBE_ARG) {
+        return false;
+    }
+
+    let app_id = args
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    let status = std::panic::catch_unwind(|| steamworks::steam_client_status(app_id)).unwrap_or(
+        SteamClientStatus {
+            available: false,
+            app_id,
+            steam_id: None,
+            persona_name: None,
+            logged_on: None,
+            error: Some("Steamworks probe panicked in child process".to_string()),
+        },
+    );
+
+    match serde_json::to_string(&status) {
+        Ok(json) => {
+            println!("{}", json);
+        }
+        Err(e) => {
+            eprintln!("Could not serialize status probe result: {}", e);
+        }
+    }
+
+    true
+}
+
+#[cfg(not(feature = "steamworks-sdk"))]
+pub fn try_handle_steam_status_probe_process() -> bool {
+    false
 }
 
 /// Upload / update a workshop item using the Steamworks SDK.
@@ -275,6 +486,46 @@ async fn upload_via_steamworks(
 ) -> Result<UploadResult, String> {
     // Run the blocking Steamworks logic in a blocking task
     tauri::async_runtime::spawn_blocking(move || steamworks::upload_item_via_steamworks(app, item))
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
+}
+
+/// Update only the Workshop description (optionally with a specific language) via Steamworks SDK.
+#[cfg(feature = "steamworks-sdk")]
+#[tauri::command]
+async fn update_description_via_steamworks(
+    app: tauri::AppHandle,
+    req: DescriptionUpdateRequest,
+) -> Result<UploadResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        steamworks::update_item_description_via_steamworks(app, req)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
+/// Update only the Workshop preview image via Steamworks SDK.
+#[cfg(feature = "steamworks-sdk")]
+#[tauri::command]
+async fn update_preview_via_steamworks(
+    app: tauri::AppHandle,
+    req: PreviewUpdateRequest,
+) -> Result<UploadResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        steamworks::update_item_preview_via_steamworks(app, req)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
+/// Query a Workshop item by Published File ID and return metadata for form backfill.
+#[cfg(feature = "steamworks-sdk")]
+#[tauri::command]
+async fn query_workshop_item_by_id(
+    app: tauri::AppHandle,
+    req: QueryWorkshopItemRequest,
+) -> Result<QueriedWorkshopItem, String> {
+    tauri::async_runtime::spawn_blocking(move || steamworks::query_workshop_item_by_id(app, req))
         .await
         .map_err(|e| format!("Task join error: {}", e))?
 }
@@ -302,6 +553,12 @@ pub fn run() {
             check_steam_client_status,
             #[cfg(feature = "steamworks-sdk")]
             upload_via_steamworks,
+            #[cfg(feature = "steamworks-sdk")]
+            update_description_via_steamworks,
+            #[cfg(feature = "steamworks-sdk")]
+            update_preview_via_steamworks,
+            #[cfg(feature = "steamworks-sdk")]
+            query_workshop_item_by_id,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

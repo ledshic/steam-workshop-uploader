@@ -4,7 +4,6 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { exists } from '@tauri-apps/plugin-fs';
 
-  // Types matching Rust
   interface WorkshopItem {
     appId: number;
     publishedFileId?: number;
@@ -29,6 +28,36 @@
     method: UploadMethod;
   }
 
+  interface DescriptionUpdatePayload {
+    appId: number;
+    publishedFileId: number;
+    description: string;
+    language?: string;
+    changeNote?: string;
+  }
+
+  interface PreviewUpdatePayload {
+    appId: number;
+    publishedFileId: number;
+    previewFile: string;
+    changeNote?: string;
+  }
+
+  interface QueryWorkshopItemPayload {
+    appId: number;
+    publishedFileId: number;
+    language?: string;
+  }
+
+  interface QueriedWorkshopItem {
+    appId: number;
+    publishedFileId: number;
+    title: string;
+    description: string;
+    visibility: 0 | 1 | 2;
+    tags: string[];
+  }
+
   interface SteamClientStatus {
     available: boolean;
     appId: number;
@@ -40,7 +69,37 @@
 
   type UploadMethod = 'sdk' | 'steamcmd';
 
-  // State
+  const APP_PRESETS = [
+    { id: 252490, name: 'Rust' },
+    { id: 294100, name: 'RimWorld' },
+    { id: 107410, name: 'Arma 3' },
+    { id: 221100, name: 'DayZ' },
+    { id: 304930, name: 'Unturned' },
+    { id: 440, name: 'TF2' },
+    { id: 730, name: 'CS2' },
+  ];
+  const VISIBILITY_LABELS = ['Public', 'Friends Only', 'Private'];
+  const ITEM_ID_HISTORY_KEY = 'publishedFileIdHistory';
+  const ITEM_ID_HISTORY_MAX = 30;
+  const STEAM_LANGUAGE_OPTIONS = [
+    { code: 'english', label: 'English' },
+    { code: 'schinese', label: 'Simplified Chinese' },
+    { code: 'tchinese', label: 'Traditional Chinese' },
+    { code: 'japanese', label: 'Japanese' },
+    { code: 'koreana', label: 'Korean' },
+    { code: 'russian', label: 'Russian' },
+    { code: 'french', label: 'French' },
+    { code: 'german', label: 'German' },
+    { code: 'spanish', label: 'Spanish' },
+    { code: 'latam', label: 'Spanish - Latin America' },
+    { code: 'brazilian', label: 'Portuguese - Brazil' },
+    { code: 'turkish', label: 'Turkish' },
+    { code: 'thai', label: 'Thai' },
+    { code: 'polish', label: 'Polish' },
+    { code: 'ukrainian', label: 'Ukrainian' },
+    { code: 'vietnamese', label: 'Vietnamese' },
+  ];
+
   let item = $state<WorkshopItem>({
     appId: 252490,
     publishedFileId: undefined,
@@ -62,43 +121,57 @@
   let lastResult = $state<string | null>(null);
   let steamClientStatus = $state<SteamClientStatus | null>(null);
   let isCheckingSteamClient = $state(false);
+  let lastSteamStatusCheckedAt = $state<string | null>(null);
+  let lastSteamStatusCheckSource = $state<'auto' | 'manual' | null>(null);
 
   let showSettings = $state(false);
   let tagInput = $state('');
+  let publishedFileIdInput = $state('');
+  let rememberedItemIds = $state<string[]>([]);
+  let descriptionLanguage = $state('english');
+  let isQueryingItem = $state(false);
 
   let unlistenLog: UnlistenFn | null = null;
   let unlistenComplete: UnlistenFn | null = null;
 
-  const APP_PRESETS = [
-    { id: 252490, name: 'Rust' },
-    { id: 294100, name: 'RimWorld' },
-    { id: 107410, name: 'Arma 3' },
-    { id: 221100, name: 'DayZ' },
-    { id: 304930, name: 'Unturned' },
-    { id: 440, name: 'TF2' },
-    { id: 730, name: 'CS2' },
-  ];
-
-  const VISIBILITY_LABELS = ['Public', 'Friends Only', 'Private'];
-
-  // Computed
   let isFormValid = $derived(
     item.appId > 0 &&
       item.title.trim().length > 0 &&
       item.contentFolder.trim().length > 0,
   );
-
   let logText = $derived(logs.map(l => l.line).join('\n'));
   let canUpload = $derived(
     isFormValid &&
       !isUploading &&
       (uploadMethod === 'sdk' || steamcmdPath.trim().length > 0),
   );
+  let canUpdateDescription = $derived(
+    uploadMethod === 'sdk' &&
+      !isUploading &&
+      getPublishedFileIdFromInput() !== undefined,
+  );
+  let canUpdatePreview = $derived(
+    uploadMethod === 'sdk' &&
+      !isUploading &&
+      getPublishedFileIdFromInput() !== undefined &&
+      (item.previewFile?.trim().length ?? 0) > 0,
+  );
+  let canQueryItem = $derived(
+    uploadMethod === 'sdk' &&
+      !isUploading &&
+      !isQueryingItem &&
+      getPublishedFileIdFromInput() !== undefined,
+  );
   let selectedPreset = $derived(
     APP_PRESETS.find(preset => preset.id === item.appId),
   );
 
-  // Helpers
+  let isDragging = $state(false);
+  let logFilter = $state<'all' | 'stdout' | 'stderr' | 'info'>('all');
+  let filteredLogs = $derived(
+    logFilter === 'all' ? logs : logs.filter(l => l.stream === logFilter),
+  );
+
   function addLog(line: string, stream: LogEntry['stream'] = 'info') {
     logs = [...logs, { line, stream, ts: new Date().toLocaleTimeString() }];
   }
@@ -109,6 +182,67 @@
 
   function copyLogs() {
     navigator.clipboard.writeText(logText);
+  }
+
+  function getPublishedFileIdFromInput(): number | undefined {
+    const normalized = publishedFileIdInput.trim();
+    if (!normalized || !/^\d+$/.test(normalized)) return undefined;
+
+    const asNumber = Number(normalized);
+    if (!Number.isSafeInteger(asNumber) || asNumber <= 0) return undefined;
+    return asNumber;
+  }
+
+  function applyPublishedFileIdInputToModel() {
+    item.publishedFileId = getPublishedFileIdFromInput();
+  }
+
+  function normalizeLanguageInput(): string | undefined {
+    const normalized = descriptionLanguage.trim().toLowerCase();
+    return normalized.length > 0 ? normalized : undefined;
+  }
+
+  function loadRememberedItemIds() {
+    try {
+      const raw = localStorage.getItem(ITEM_ID_HISTORY_KEY);
+      if (!raw) {
+        rememberedItemIds = [];
+        return;
+      }
+
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        rememberedItemIds = [];
+        return;
+      }
+
+      rememberedItemIds = parsed
+        .map((value: unknown) => String(value).trim())
+        .filter(value => /^\d+$/.test(value) && Number(value) > 0)
+        .slice(0, ITEM_ID_HISTORY_MAX);
+    } catch {
+      rememberedItemIds = [];
+    }
+  }
+
+  function saveRememberedItemIds() {
+    localStorage.setItem(ITEM_ID_HISTORY_KEY, JSON.stringify(rememberedItemIds));
+  }
+
+  function rememberPublishedFileId(id: number) {
+    const normalized = String(id).trim();
+    if (!/^\d+$/.test(normalized) || Number(normalized) <= 0) return;
+
+    rememberedItemIds = [
+      normalized,
+      ...rememberedItemIds.filter(existing => existing !== normalized),
+    ].slice(0, ITEM_ID_HISTORY_MAX);
+    saveRememberedItemIds();
+  }
+
+  function removeRememberedItemId(id: string) {
+    rememberedItemIds = rememberedItemIds.filter(existing => existing !== id);
+    saveRememberedItemIds();
   }
 
   async function selectContentFolder() {
@@ -142,7 +276,7 @@
     }
   }
 
-  async function refreshSteamClientStatus() {
+  async function refreshSteamClientStatus(source: 'auto' | 'manual' = 'manual') {
     if (uploadMethod !== 'sdk') return;
 
     isCheckingSteamClient = true;
@@ -161,6 +295,8 @@
       };
     } finally {
       isCheckingSteamClient = false;
+      lastSteamStatusCheckedAt = new Date().toLocaleTimeString();
+      lastSteamStatusCheckSource = source;
     }
   }
 
@@ -177,9 +313,12 @@
   }
 
   function buildUploadPayload() {
+    const parsedPublishedFileId = getPublishedFileIdFromInput();
+    item.publishedFileId = parsedPublishedFileId;
+
     return {
       appId: item.appId,
-      publishedFileId: item.publishedFileId || undefined,
+      publishedFileId: parsedPublishedFileId,
       contentFolder: item.contentFolder,
       previewFile: item.previewFile || undefined,
       title: item.title,
@@ -244,6 +383,8 @@
 
       if (success && method === 'sdk' && publishedFileId) {
         item.publishedFileId = publishedFileId;
+        publishedFileIdInput = String(publishedFileId);
+        rememberPublishedFileId(publishedFileId);
         lastResult = needsLegalAgreement
           ? `SDK upload completed. PublishedFileID: ${publishedFileId}. Accept the Workshop legal agreement in Steam.`
           : `SDK upload completed. PublishedFileID: ${publishedFileId}`;
@@ -311,12 +452,19 @@
 
     try {
       await prepareUploadListeners();
+      const payload = buildUploadPayload();
+      if (payload.publishedFileId) {
+        rememberPublishedFileId(payload.publishedFileId);
+      }
+
       const result = await invoke<UploadResult>('upload_via_steamworks', {
-        item: buildUploadPayload(),
+        item: payload,
       });
 
       isUploading = false;
       item.publishedFileId = result.publishedFileId;
+      publishedFileIdInput = String(result.publishedFileId);
+      rememberPublishedFileId(result.publishedFileId);
       uploadStatus = 'success';
       lastResult = result.needsLegalAgreement
         ? `SDK upload completed. PublishedFileID: ${result.publishedFileId}. Accept the Workshop legal agreement in Steam.`
@@ -338,6 +486,155 @@
     }
   }
 
+  async function updateDescriptionOnly() {
+    const publishedFileId = getPublishedFileIdFromInput();
+    if (!publishedFileId) {
+      alert('Please provide a valid Published File ID.');
+      return;
+    }
+
+    const payload: DescriptionUpdatePayload = {
+      appId: item.appId,
+      publishedFileId,
+      description: item.description,
+      language: normalizeLanguageInput(),
+      changeNote: item.changeNote || undefined,
+    };
+    rememberPublishedFileId(publishedFileId);
+
+    logs = [];
+    isUploading = true;
+    uploadStatus = 'running';
+    lastResult = null;
+
+    addLog('Starting description-only update via Steamworks SDK...', 'info');
+
+    try {
+      await prepareUploadListeners();
+      const result = await invoke<UploadResult>('update_description_via_steamworks', {
+        req: payload,
+      });
+
+      isUploading = false;
+      item.publishedFileId = result.publishedFileId;
+      publishedFileIdInput = String(result.publishedFileId);
+      rememberPublishedFileId(result.publishedFileId);
+      uploadStatus = 'success';
+      lastResult = result.needsLegalAgreement
+        ? `Description updated. PublishedFileID: ${result.publishedFileId}. Accept the Workshop legal agreement in Steam.`
+        : `Description updated. PublishedFileID: ${result.publishedFileId}`;
+    } catch (err: any) {
+      isUploading = false;
+      uploadStatus = 'error';
+      addLog(`Description update failed: ${err}`, 'stderr');
+      cleanupListeners();
+      alert(`Description update error: ${err}`);
+    }
+  }
+
+  async function updatePreviewOnly() {
+    const publishedFileId = getPublishedFileIdFromInput();
+    if (!publishedFileId) {
+      alert('Please provide a valid Published File ID.');
+      return;
+    }
+    if (!item.previewFile?.trim()) {
+      alert('Please choose a preview image first.');
+      return;
+    }
+
+    const payload: PreviewUpdatePayload = {
+      appId: item.appId,
+      publishedFileId,
+      previewFile: item.previewFile,
+      changeNote: item.changeNote || undefined,
+    };
+    rememberPublishedFileId(publishedFileId);
+
+    logs = [];
+    isUploading = true;
+    uploadStatus = 'running';
+    lastResult = null;
+
+    addLog('Starting preview-image-only update via Steamworks SDK...', 'info');
+
+    try {
+      await prepareUploadListeners();
+      const result = await invoke<UploadResult>('update_preview_via_steamworks', {
+        req: payload,
+      });
+
+      isUploading = false;
+      item.publishedFileId = result.publishedFileId;
+      publishedFileIdInput = String(result.publishedFileId);
+      rememberPublishedFileId(result.publishedFileId);
+      uploadStatus = 'success';
+      lastResult = result.needsLegalAgreement
+        ? `Preview image updated. PublishedFileID: ${result.publishedFileId}. Accept the Workshop legal agreement in Steam.`
+        : `Preview image updated. PublishedFileID: ${result.publishedFileId}`;
+    } catch (err: any) {
+      isUploading = false;
+      uploadStatus = 'error';
+      addLog(`Preview image update failed: ${err}`, 'stderr');
+      cleanupListeners();
+      alert(`Preview image update error: ${err}`);
+    }
+  }
+
+  async function queryItemAndFillForm() {
+    const publishedFileId = getPublishedFileIdFromInput();
+    if (!publishedFileId) {
+      alert('Please provide a valid Published File ID.');
+      return;
+    }
+
+    const payload: QueryWorkshopItemPayload = {
+      appId: item.appId,
+      publishedFileId,
+      language: normalizeLanguageInput(),
+    };
+
+    isQueryingItem = true;
+    addLog(
+      `Querying item ${publishedFileId} via Steamworks SDK...`,
+      'info',
+    );
+
+    try {
+      const queried = await invoke<QueriedWorkshopItem>(
+        'query_workshop_item_by_id',
+        {
+          req: payload,
+        },
+      );
+
+      if (queried.appId !== item.appId) {
+        addLog(
+          `Queried item belongs to AppID ${queried.appId}; keeping current AppID ${item.appId} to avoid SDK status check crashes.`,
+          'info',
+        );
+      }
+      item.publishedFileId = queried.publishedFileId;
+      item.title = queried.title;
+      item.description = queried.description;
+      item.visibility = queried.visibility;
+      item.tags = queried.tags;
+
+      publishedFileIdInput = String(queried.publishedFileId);
+      rememberPublishedFileId(queried.publishedFileId);
+
+      addLog(
+        `Loaded item ${queried.publishedFileId} into form fields.`,
+        'info',
+      );
+    } catch (err: any) {
+      addLog(`Item query failed: ${err}`, 'stderr');
+      alert(`Item query error: ${err}`);
+    } finally {
+      isQueryingItem = false;
+    }
+  }
+
   async function validateSteamcmdPath(path: string) {
     if (!path) return false;
     try {
@@ -355,10 +652,7 @@
     });
     if (selected && typeof selected === 'string') {
       const ok = await validateSteamcmdPath(selected);
-      if (
-        ok ||
-        confirm('File name does not look like steamcmd. Use it anyway?')
-      ) {
+      if (ok || confirm('File name does not look like steamcmd. Use it anyway?')) {
         steamcmdPath = selected;
       }
     }
@@ -399,6 +693,7 @@
         }
       } catch (_) {}
     }
+
     addLog(
       'Could not auto-detect steamcmd. Please set the path manually.',
       'info',
@@ -419,6 +714,7 @@
       visibility: 0,
       tags: ['Mod'],
     };
+    publishedFileIdInput = '';
     generatedVdf = '';
     logs = [];
     uploadStatus = 'idle';
@@ -441,43 +737,6 @@
     }
   }
 
-  $effect(() => {
-    const saved = localStorage.getItem('steamcmdPath');
-    if (saved) steamcmdPath = saved;
-    const savedMethod = localStorage.getItem('uploadMethod');
-    if (savedMethod === 'sdk' || savedMethod === 'steamcmd') {
-      uploadMethod = savedMethod;
-    }
-  });
-
-  $effect(() => {
-    if (steamcmdPath) localStorage.setItem('steamcmdPath', steamcmdPath);
-  });
-
-  $effect(() => {
-    localStorage.setItem('uploadMethod', uploadMethod);
-  });
-
-  $effect(() => {
-    if (showSettings && uploadMethod === 'sdk') {
-      refreshSteamClientStatus();
-    }
-  });
-
-  $effect(() => {
-    return () => {
-      cleanupListeners();
-    };
-  });
-
-  // === Modern additions: Drag & Drop + Log filter ===
-  let isDragging = $state(false);
-  let logFilter = $state<'all' | 'stdout' | 'stderr' | 'info'>('all');
-
-  let filteredLogs = $derived(
-    logFilter === 'all' ? logs : logs.filter(l => l.stream === logFilter),
-  );
-
   function handleDragOver(e: DragEvent) {
     e.preventDefault();
     isDragging = true;
@@ -494,18 +753,44 @@
     const file = e.dataTransfer?.files?.[0];
     if (!file) return;
 
-    // If it's a directory drop (Tauri gives us path via special handling in real drops)
-    // For simplicity we ask the user to confirm or use the native dialog as fallback.
-    // Real directory drops in webview are limited — we still use the dialog for reliability.
-    if (file.name && !file.type) {
-      // Likely a folder — fall back to dialog for accuracy
-    }
     await selectContentFolder();
   }
 
   function setLogFilter(f: typeof logFilter) {
     logFilter = f;
   }
+
+  $effect(() => {
+    const saved = localStorage.getItem('steamcmdPath');
+    if (saved) steamcmdPath = saved;
+    const savedMethod = localStorage.getItem('uploadMethod');
+    if (savedMethod === 'sdk' || savedMethod === 'steamcmd') {
+      uploadMethod = savedMethod;
+    }
+    loadRememberedItemIds();
+  });
+
+  $effect(() => {
+    if (steamcmdPath) {
+      localStorage.setItem('steamcmdPath', steamcmdPath);
+    }
+  });
+
+  $effect(() => {
+    localStorage.setItem('uploadMethod', uploadMethod);
+  });
+
+  $effect(() => {
+    if (showSettings && uploadMethod === 'sdk') {
+      refreshSteamClientStatus('auto');
+    }
+  });
+
+  $effect(() => {
+    return () => {
+      cleanupListeners();
+    };
+  });
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -618,13 +903,57 @@
               class="text-xs text-zinc-500 block mb-1.5"
               >Published File ID (for updates)</label
             >
-            <input
-              id="published-file-id"
-              type="number"
-              placeholder="Leave empty for new upload"
-              bind:value={item.publishedFileId}
-              class="path-input w-full"
-            />
+            <div class="flex gap-2">
+              <input
+                id="published-file-id"
+                type="text"
+                inputmode="numeric"
+                pattern="[0-9]*"
+                list="published-file-id-history"
+                placeholder="Leave empty for new upload"
+                bind:value={publishedFileIdInput}
+                onblur={applyPublishedFileIdInputToModel}
+                class="path-input w-full"
+              />
+              <button
+                type="button"
+                onclick={queryItemAndFillForm}
+                disabled={!canQueryItem}
+                class="btn-secondary px-3 text-xs whitespace-nowrap disabled:opacity-50"
+              >
+                {isQueryingItem ? 'Querying...' : 'Query & Fill'}
+              </button>
+            </div>
+            <datalist id="published-file-id-history">
+              {#each rememberedItemIds as rememberedId}
+                <option value={rememberedId}></option>
+              {/each}
+            </datalist>
+
+            {#if rememberedItemIds.length > 0}
+              <div class="mt-2 flex flex-wrap gap-1.5">
+                {#each rememberedItemIds as rememberedId}
+                  <div
+                    class="inline-flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px]"
+                  >
+                    <button
+                      type="button"
+                      class="font-mono text-zinc-300 hover:text-white"
+                      onclick={() => {
+                        publishedFileIdInput = rememberedId;
+                        applyPublishedFileIdInputToModel();
+                      }}>{rememberedId}</button
+                    >
+                    <button
+                      type="button"
+                      class="text-zinc-500 hover:text-red-300"
+                      aria-label={`Delete remembered ID ${rememberedId}`}
+                      onclick={() => removeRememberedItemId(rememberedId)}>×</button
+                    >
+                  </div>
+                {/each}
+              </div>
+            {/if}
           </div>
         </div>
 
@@ -737,6 +1066,27 @@
               placeholder="What does this mod do?"
               class="path-input w-full"
             ></textarea>
+            <div class="mt-2">
+              <label
+                for="description-language"
+                class="text-xs text-zinc-500 block mb-1.5"
+                >Description language code</label
+              >
+              <select
+                id="description-language"
+                bind:value={descriptionLanguage}
+                class="path-input w-full"
+              >
+                {#each STEAM_LANGUAGE_OPTIONS as language}
+                  <option value={language.code}>
+                    {language.label} ({language.code})
+                  </option>
+                {/each}
+              </select>
+              <div class="mt-1 text-[11px] text-zinc-500">
+                Used by "Update Description Only" in Steamworks SDK mode.
+              </div>
+            </div>
           </div>
 
           <div>
@@ -876,6 +1226,22 @@
                   ? 'Steamworks SDK'
                   : 'steamcmd'}
               {/if}
+            </button>
+
+            <button
+              onclick={updateDescriptionOnly}
+              disabled={!canUpdateDescription}
+              class="w-full py-3 font-semibold rounded-2xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 disabled:opacity-50 transition active:scale-[0.985]"
+            >
+              Update Description Only ({normalizeLanguageInput() || 'default'})
+            </button>
+
+            <button
+              onclick={updatePreviewOnly}
+              disabled={!canUpdatePreview}
+              class="w-full py-3 font-semibold rounded-2xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 disabled:opacity-50 transition active:scale-[0.985]"
+            >
+              Update Preview Only
             </button>
             <div class="text-center text-[10px] text-zinc-500">⌘ + Enter</div>
           </div>
@@ -1036,15 +1402,32 @@
               <div class="text-xs text-zinc-500">
                 Checked with AppID {item.appId}
               </div>
+              {#if lastSteamStatusCheckedAt}
+                <div class="text-[11px] text-zinc-500 mt-1">
+                  Last check: {lastSteamStatusCheckedAt}
+                  ({lastSteamStatusCheckSource === 'auto'
+                    ? 'auto'
+                    : 'manual'})
+                </div>
+              {/if}
             </div>
             <button
-              onclick={refreshSteamClientStatus}
+              onclick={() => refreshSteamClientStatus('manual')}
               disabled={isCheckingSteamClient}
               class="btn-secondary text-xs py-1.5 px-3"
             >
               {isCheckingSteamClient ? 'Checking...' : 'Refresh'}
             </button>
           </div>
+
+          {#if isCheckingSteamClient}
+            <div class="flex items-center gap-2 text-xs text-blue-400 mb-3">
+              <span
+                class="w-3 h-3 border-2 border-blue-400/30 border-t-blue-400 rounded-full animate-spin"
+              ></span>
+              Detecting Steam client status...
+            </div>
+          {/if}
 
           {#if steamClientStatus?.available}
             <div class="flex items-center gap-2 text-sm text-emerald-400 mb-3">

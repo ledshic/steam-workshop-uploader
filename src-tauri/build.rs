@@ -150,8 +150,8 @@ fn copy_steam_api_windows_dll() {
 }
 
 #[cfg(target_os = "windows")]
-fn find_windows_steam_api_dll(profile_dir: &std::path::Path) -> Option<PathBuf> {
-    use std::{env, fs};
+fn find_windows_steam_api_dll(profile_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::{env, fs, path::PathBuf};
 
     let build_dir = profile_dir.join("build");
     let candidate_names = ["steam_api64.dll", "steam_api.dll"];

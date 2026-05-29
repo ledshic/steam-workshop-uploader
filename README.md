@@ -21,6 +21,7 @@ A cross-platform desktop app (Windows / macOS / Linux) built with **Tauri v2 + R
 2. **Node.js 18+** + pnpm (or npm)
 3. **Steam client** running and logged in for the default SDK upload method
 4. Optional: **steamcmd** for the fallback upload method
+5. On Windows, make sure `steam_api64.dll` from the Steamworks redistributables is available through `STEAMWORKS_SDK_PATH` or a local Steamworks SDK checkout so the bundled app can ship it
 
 ## Development
 

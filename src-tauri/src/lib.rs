@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 
+mod app_icon;
 mod rimworld;
 
 #[cfg(feature = "steamworks-sdk")]
@@ -564,6 +565,19 @@ fn rimworld_app_id() -> u32 {
     rimworld::RIMWORLD_APP_ID
 }
 
+/// Set Dock / window icon theme: `light` | `dark` | `system`.
+/// Returns the resolved theme actually applied (`light` or `dark`).
+#[tauri::command]
+fn set_app_icon_theme(app: tauri::AppHandle, theme: String) -> Result<String, String> {
+    let pref = app_icon::IconThemePref::parse(&theme)?;
+    app_icon::apply_icon_theme(&app, pref)
+}
+
+/// Current OS dark-mode flag (for UI badges / debugging).
+#[tauri::command]
+fn is_system_dark_mode() -> bool {
+    app_icon::is_system_dark()
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -573,6 +587,11 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .setup(|app| {
+            // Default to light (restored primary); frontend may override from saved pref.
+            let _ = app_icon::apply_icon_theme(app.handle(), app_icon::IconThemePref::Light);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             generate_workshop_vdf,
@@ -583,6 +602,8 @@ pub fn run() {
             prepare_rimworld_package,
             write_rimworld_published_file_id,
             rimworld_app_id,
+            set_app_icon_theme,
+            is_system_dark_mode,
             #[cfg(feature = "steamworks-sdk")]
             check_steam_client_status,
             #[cfg(feature = "steamworks-sdk")]

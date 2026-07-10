@@ -96,6 +96,8 @@
   const ITEM_ID_HISTORY_KEY = 'publishedFileIdHistory';
   const ITEM_ID_HISTORY_MAX = 30;
   const CLEAN_PACKAGE_KEY = 'rimworldCleanPackage';
+  const ICON_THEME_KEY = 'appIconTheme';
+  type IconThemePref = 'light' | 'dark' | 'system';
   const STEAM_LANGUAGE_OPTIONS = [
     { code: 'english', label: 'English' },
     { code: 'schinese', label: 'Simplified Chinese' },
@@ -154,6 +156,9 @@
   let hasTempPackage = $derived(
     Boolean(packagePath) || Boolean(rimworldInfo?.isPackaged),
   );
+  /** Dock / window icon: light (default), dark, or follow OS. */
+  let iconTheme = $state<IconThemePref>('light');
+  let resolvedIconTheme = $state<'light' | 'dark'>('light');
 
   let unlistenLog: UnlistenFn | null = null;
   let unlistenComplete: UnlistenFn | null = null;
@@ -434,6 +439,33 @@
     item.appId = appId || RIMWORLD_APP_ID;
   }
 
+  function systemPrefersDark(): boolean {
+    return (
+      typeof window !== 'undefined' &&
+      !!window.matchMedia?.('(prefers-color-scheme: dark)').matches
+    );
+  }
+
+  async function applyIconTheme(pref: IconThemePref = iconTheme) {
+    iconTheme = pref;
+    try {
+      const resolved = await invoke<string>('set_app_icon_theme', {
+        theme: pref,
+      });
+      if (resolved === 'dark' || resolved === 'light') {
+        resolvedIconTheme = resolved;
+      }
+      localStorage.setItem(ICON_THEME_KEY, pref);
+    } catch (err: any) {
+      addLog(`[Icon] Could not set theme '${pref}': ${err}`, 'stderr');
+    }
+  }
+
+  function onSystemColorSchemeChange() {
+    if (iconTheme === 'system') {
+      void applyIconTheme('system');
+    }
+  }
 
   async function persistPublishedFileId(id: number) {
     const root = modRootPath || rimworldInfo?.modRoot || item.contentFolder;
@@ -992,9 +1024,31 @@
     } else if (savedClean === '1' || savedClean === 'true') {
       cleanPackage = true;
     }
+    const savedIcon = localStorage.getItem(ICON_THEME_KEY);
+    if (savedIcon === 'light' || savedIcon === 'dark' || savedIcon === 'system') {
+      iconTheme = savedIcon;
+    }
     // Always default to RimWorld
     item.appId = RIMWORLD_APP_ID;
     loadRememberedItemIds();
+    void applyIconTheme(iconTheme);
+
+    const mql = window.matchMedia?.('(prefers-color-scheme: dark)');
+    if (mql) {
+      // Safari < 14 uses addListener
+      if (typeof mql.addEventListener === 'function') {
+        mql.addEventListener('change', onSystemColorSchemeChange);
+      } else if (typeof (mql as any).addListener === 'function') {
+        (mql as any).addListener(onSystemColorSchemeChange);
+      }
+      return () => {
+        if (typeof mql.removeEventListener === 'function') {
+          mql.removeEventListener('change', onSystemColorSchemeChange);
+        } else if (typeof (mql as any).removeListener === 'function') {
+          (mql as any).removeListener(onSystemColorSchemeChange);
+        }
+      };
+    }
   });
 
   $effect(() => {
@@ -1782,6 +1836,37 @@
       class="relative pointer-events-auto w-full max-w-md bg-zinc-900 border border-zinc-700 rounded-3xl p-7"
     >
       <div id="settings-title" class="text-xl font-semibold mb-5">Settings</div>
+
+      <div class="mb-6">
+        <div class="block text-sm text-zinc-400 mb-1.5">App icon</div>
+        <div class="segmented w-full">
+          <button
+            type="button"
+            onclick={() => applyIconTheme('light')}
+            class:active={iconTheme === 'light'}>Light</button
+          >
+          <button
+            type="button"
+            onclick={() => applyIconTheme('dark')}
+            class:active={iconTheme === 'dark'}>Dark</button
+          >
+          <button
+            type="button"
+            onclick={() => applyIconTheme('system')}
+            class:active={iconTheme === 'system'}>System</button
+          >
+        </div>
+        <div class="mt-2 text-xs text-zinc-500">
+          Dock / window icon.
+          {#if iconTheme === 'system'}
+            Following OS appearance → currently
+            <span class="text-zinc-300">{resolvedIconTheme}</span>
+            ({systemPrefersDark() ? 'OS dark' : 'OS light'}).
+          {:else}
+            Using <span class="text-zinc-300">{iconTheme}</span> theme.
+          {/if}
+        </div>
+      </div>
 
       <div class="mb-6">
         <div class="block text-sm text-zinc-400 mb-1.5">Upload method</div>

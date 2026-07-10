@@ -246,9 +246,15 @@ fn upload_item_via_steamworks_inner(
     let app_id = AppId(item.app_id);
 
     let mut needs_legal_agreement = false;
+    let is_update = item.published_file_id.filter(|id| *id > 0).is_some();
     let published_file_id = match item.published_file_id.filter(|id| *id > 0) {
         Some(id) => {
             emit_log(&app, &format!("Updating Workshop item {}", id), "info");
+            // Fail early with a clear message if the ID is dead / deleted / wrong app.
+            if let Err(msg) = verify_published_file_exists(id) {
+                emit_log(&app, &msg, "stderr");
+                return Err(msg);
+            }
             PublishedFileId(id)
         }
         None => {
@@ -259,7 +265,35 @@ fn upload_item_via_steamworks_inner(
         }
     };
 
-    emit_log(&app, "Preparing Workshop item update...", "info");
+    emit_log(
+        &app,
+        &format!(
+            "Preparing Workshop item update...\n  content: {}\n  preview: {}",
+            item.content_folder,
+            item.preview_file
+                .as_deref()
+                .filter(|p| !p.trim().is_empty())
+                .unwrap_or("(none)")
+        ),
+        "info",
+    );
+
+    // Re-check paths right before hand-off to Steam (temp packages can disappear).
+    if !Path::new(&item.content_folder).is_dir() {
+        return Err(format!(
+            "Content folder disappeared before upload: {}",
+            item.content_folder
+        ));
+    }
+    if let Some(preview) = &item.preview_file {
+        if !preview.trim().is_empty() && !Path::new(preview).is_file() {
+            return Err(format!(
+                "Preview file disappeared before upload: {}",
+                preview
+            ));
+        }
+    }
+
     let mut update = ugc
         .start_item_update(app_id, published_file_id)
         .title(&item.title)
@@ -279,7 +313,31 @@ fn upload_item_via_steamworks_inner(
 
     emit_log(&app, "Submitting Workshop item update...", "info");
     let (final_id, submit_needs_legal_agreement) =
-        submit_update_and_wait(&client, &app, update, item.change_note.as_deref())?;
+        submit_update_and_wait(&client, &app, update, item.change_note.as_deref()).map_err(
+            |err| {
+                if is_update && err.to_ascii_lowercase().contains("file was not found") {
+                    format!(
+                        "{err}\n\n\
+                         This usually means Published File ID {} is invalid or was deleted on Steam.\n\
+                         Fix: clear About/PublishedFileId.txt (and the Published File ID field), \
+                         then upload again as a NEW item.",
+                        published_file_id.0
+                    )
+                } else if err.to_ascii_lowercase().contains("file was not found") {
+                    format!(
+                        "{err}\n\n\
+                         Steam could not read the content folder or preview image.\n\
+                         content: {}\n\
+                         preview: {}\n\
+                         Try regenerating the temp package, or use the original mod folder.",
+                        item.content_folder,
+                        item.preview_file.as_deref().unwrap_or("(none)")
+                    )
+                } else {
+                    err
+                }
+            },
+        )?;
     needs_legal_agreement = needs_legal_agreement || submit_needs_legal_agreement;
 
     if needs_legal_agreement {
@@ -448,6 +506,60 @@ fn update_item_preview_via_steamworks_inner(
         needs_legal_agreement,
         method: "sdk".to_string(),
     })
+}
+
+/// Soft-check via Steam Web API whether a published file still exists.
+/// Result code 1 = OK; 9 = FileNotFound (deleted / never existed / private+inaccessible).
+fn verify_published_file_exists(published_file_id: u64) -> Result<(), String> {
+    let endpoint = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
+    let body = format!("itemcount=1&publishedfileids[0]={}", published_file_id);
+    let response = match ureq::post(endpoint)
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .send_string(&body)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // Network failure should not block upload — Steam client may still succeed.
+            eprintln!("PublishedFileId pre-check skipped (network): {}", e);
+            return Ok(());
+        }
+    };
+
+    let value: serde_json::Value = match response.into_json() {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+
+    let details = value
+        .get("response")
+        .and_then(|v| v.get("publishedfiledetails"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first());
+
+    let Some(details) = details else {
+        return Ok(());
+    };
+
+    let result_code = details.get("result").and_then(|v| v.as_u64()).unwrap_or(0);
+    if result_code == 1 {
+        return Ok(());
+    }
+
+    // 9 = FileNotFound
+    if result_code == 9 {
+        return Err(format!(
+            "Published File ID {} was not found on Steam (deleted or never published successfully).\n\n\
+             Fix:\n\
+             1. Clear the Published File ID field in the app\n\
+             2. Delete About/PublishedFileId.txt in your mod folder (if present)\n\
+             3. Upload again as a NEW item\n\n\
+             Steam API result code: {}",
+            published_file_id, result_code
+        ));
+    }
+
+    // Other codes — warn but allow Steam client path to proceed.
+    Ok(())
 }
 
 fn submit_update_and_wait(

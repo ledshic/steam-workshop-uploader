@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 
+mod rimworld;
+
 #[cfg(feature = "steamworks-sdk")]
 mod steamworks;
 
@@ -535,6 +537,34 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+/// Detect RimWorld mod metadata from a folder (About/About.xml, Preview, PublishedFileId).
+#[tauri::command]
+fn detect_rimworld_mod(path: String) -> Result<rimworld::RimWorldModInfo, String> {
+    rimworld::detect_rimworld_mod(path)
+}
+
+/// Prepare a clean Workshop package excluding Source / VCS / build artifacts.
+#[tauri::command]
+fn prepare_rimworld_package(
+    req: rimworld::PreparePackageRequest,
+) -> Result<rimworld::RimWorldModInfo, String> {
+    rimworld::prepare_rimworld_package(req)
+}
+
+/// Persist About/PublishedFileId.txt after a successful first upload.
+#[tauri::command]
+fn write_rimworld_published_file_id(
+    req: rimworld::WritePublishedFileIdRequest,
+) -> Result<String, String> {
+    rimworld::write_published_file_id(req)
+}
+
+#[tauri::command]
+fn rimworld_app_id() -> u32 {
+    rimworld::RIMWORLD_APP_ID
+}
+
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -549,6 +579,10 @@ pub fn run() {
             write_temp_vdf,
             start_workshop_upload,
             is_valid_steamcmd,
+            detect_rimworld_mod,
+            prepare_rimworld_package,
+            write_rimworld_published_file_id,
+            rimworld_app_id,
             #[cfg(feature = "steamworks-sdk")]
             check_steam_client_status,
             #[cfg(feature = "steamworks-sdk")]

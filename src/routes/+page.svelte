@@ -3,6 +3,7 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { open } from '@tauri-apps/plugin-dialog';
   import { exists } from '@tauri-apps/plugin-fs';
+  import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 
   interface WorkshopItem {
     appId: number;
@@ -67,20 +68,34 @@
     error?: string;
   }
 
+  interface RimWorldModInfo {
+    modRoot: string;
+    contentFolder: string;
+    aboutXmlPath: string;
+    name: string;
+    description: string;
+    author?: string;
+    packageId?: string;
+    url?: string;
+    supportedVersions: string[];
+    previewFile?: string;
+    publishedFileId?: number;
+    publishedFileIdPath?: string;
+    tags: string[];
+    warnings: string[];
+    detectedFiles: string[];
+    isPackaged: boolean;
+  }
+
   type UploadMethod = 'sdk' | 'steamcmd';
 
-  const APP_PRESETS = [
-    { id: 252490, name: 'Rust' },
-    { id: 294100, name: 'RimWorld' },
-    { id: 107410, name: 'Arma 3' },
-    { id: 221100, name: 'DayZ' },
-    { id: 304930, name: 'Unturned' },
-    { id: 440, name: 'TF2' },
-    { id: 730, name: 'CS2' },
-  ];
+  /** App is specialized for RimWorld Workshop uploads. */
+  const RIMWORLD_APP_ID = 294100;
+  const APP_PRESETS = [{ id: RIMWORLD_APP_ID, name: 'RimWorld' }];
   const VISIBILITY_LABELS = ['Public', 'Friends Only', 'Private'];
   const ITEM_ID_HISTORY_KEY = 'publishedFileIdHistory';
   const ITEM_ID_HISTORY_MAX = 30;
+  const CLEAN_PACKAGE_KEY = 'rimworldCleanPackage';
   const STEAM_LANGUAGE_OPTIONS = [
     { code: 'english', label: 'English' },
     { code: 'schinese', label: 'Simplified Chinese' },
@@ -101,7 +116,7 @@
   ];
 
   let item = $state<WorkshopItem>({
-    appId: 252490,
+    appId: RIMWORLD_APP_ID,
     publishedFileId: undefined,
     contentFolder: '',
     previewFile: '',
@@ -130,6 +145,15 @@
   let rememberedItemIds = $state<string[]>([]);
   let descriptionLanguage = $state('english');
   let isQueryingItem = $state(false);
+  let isDetectingMod = $state(false);
+  let isPackaging = $state(false);
+  let cleanPackage = $state(true);
+  let modRootPath = $state('');
+  let packagePath = $state('');
+  let rimworldInfo = $state<RimWorldModInfo | null>(null);
+  let hasTempPackage = $derived(
+    Boolean(packagePath) || Boolean(rimworldInfo?.isPackaged),
+  );
 
   let unlistenLog: UnlistenFn | null = null;
   let unlistenComplete: UnlistenFn | null = null;
@@ -245,14 +269,152 @@
     saveRememberedItemIds();
   }
 
+  function applyRimWorldInfo(info: RimWorldModInfo, opts?: { keepPackage?: boolean }) {
+    rimworldInfo = info;
+    modRootPath = info.modRoot;
+    item.appId = RIMWORLD_APP_ID;
+    item.contentFolder = info.contentFolder;
+    item.title = info.name;
+    item.description = info.description;
+    item.previewFile = info.previewFile || '';
+    item.tags = info.tags.length > 0 ? [...info.tags] : ['Mod'];
+
+    if (info.isPackaged) {
+      packagePath = info.contentFolder;
+    } else if (!opts?.keepPackage) {
+      packagePath = '';
+    }
+
+    if (info.publishedFileId) {
+      item.publishedFileId = info.publishedFileId;
+      publishedFileIdInput = String(info.publishedFileId);
+      rememberPublishedFileId(info.publishedFileId);
+    }
+
+    for (const warning of info.warnings) {
+      addLog(`[RimWorld] ${warning}`, 'info');
+    }
+    addLog(
+      `[RimWorld] Detected "${info.name}"` +
+        (info.packageId ? ` (${info.packageId})` : '') +
+        (info.publishedFileId
+          ? ` → update #${info.publishedFileId}`
+          : ' → new upload') +
+        (info.isPackaged ? ' [temp package]' : ''),
+      'info',
+    );
+  }
+
+  /** Scan mod metadata only — does not create a temp upload package. */
+  async function detectRimWorldFromPath(
+    path: string,
+  ): Promise<RimWorldModInfo | null> {
+    isDetectingMod = true;
+    try {
+      addLog('[RimWorld] Scanning mod structure...', 'info');
+      const info = await invoke<RimWorldModInfo>('detect_rimworld_mod', { path });
+      applyRimWorldInfo(info);
+      return info;
+    } catch (err: any) {
+      addLog(`[RimWorld] Detect failed: ${err}`, 'stderr');
+      item.contentFolder = path;
+      modRootPath = path;
+      packagePath = '';
+      rimworldInfo = null;
+      alert(`RimWorld detect failed: ${err}`);
+      return null;
+    } finally {
+      isDetectingMod = false;
+    }
+  }
+
+  /**
+   * One-click: build a clean temp directory for Workshop upload
+   * (excludes Source / .git / build artifacts), then open it in the file manager.
+   */
+  async function generateTempPackage(
+    options: { openAfter?: boolean } = { openAfter: true },
+  ): Promise<RimWorldModInfo | null> {
+    const path = modRootPath || item.contentFolder;
+    if (!path) {
+      alert('Please select a RimWorld mod folder first.');
+      return null;
+    }
+    if (isPackaging || isDetectingMod) return null;
+
+    isPackaging = true;
+    try {
+      addLog(
+        '[RimWorld] Generating temp upload package (excluding Source/VCS/build)...',
+        'info',
+      );
+      const info = await invoke<RimWorldModInfo>('prepare_rimworld_package', {
+        req: { modRoot: path },
+      });
+      applyRimWorldInfo(info);
+      packagePath = info.contentFolder;
+      addLog(`[RimWorld] Temp package ready: ${info.contentFolder}`, 'info');
+
+      if (options.openAfter !== false) {
+        await openPackageInFileManager(info.contentFolder);
+      }
+      return info;
+    } catch (err: any) {
+      addLog(`[RimWorld] Package failed: ${err}`, 'stderr');
+      alert(`Failed to generate temp package: ${err}`);
+      return null;
+    } finally {
+      isPackaging = false;
+    }
+  }
+
+  async function openPackageInFileManager(targetPath?: string) {
+    const path = targetPath || packagePath || item.contentFolder;
+    if (!path) {
+      alert('No package directory to open.');
+      return;
+    }
+    try {
+      // Prefer opening the folder itself in Finder / Explorer / file manager.
+      await openPath(path);
+      addLog(`[RimWorld] Opened package folder: ${path}`, 'info');
+    } catch (openErr: any) {
+      try {
+        await revealItemInDir(path);
+        addLog(`[RimWorld] Revealed package in file manager: ${path}`, 'info');
+      } catch (revealErr: any) {
+        addLog(
+          `[RimWorld] Could not open file manager: ${openErr}; ${revealErr}`,
+          'stderr',
+        );
+        alert(`Could not open file manager:\n${openErr}`);
+      }
+    }
+  }
+
   async function selectContentFolder() {
     const selected = await open({
       directory: true,
       multiple: false,
-      title: 'Select mod content folder',
+      title: 'Select RimWorld mod folder (contains About/)',
     });
     if (selected && typeof selected === 'string') {
-      item.contentFolder = selected;
+      await detectRimWorldFromPath(selected);
+    }
+  }
+
+  async function rescanRimWorldMod() {
+    const path = modRootPath || item.contentFolder;
+    if (!path) {
+      await selectContentFolder();
+      return;
+    }
+    // Rescan metadata only; keep existing temp package if any until regenerated.
+    const previousPackage = packagePath;
+    const info = await detectRimWorldFromPath(path);
+    if (info && previousPackage && !info.isPackaged) {
+      // Restore upload target to previous package if still desired
+      // User must regenerate to refresh package contents.
     }
   }
 
@@ -269,10 +431,23 @@
   }
 
   function setPreset(appId: number) {
-    item.appId = appId;
-    const preset = APP_PRESETS.find(p => p.id === appId);
-    if (!item.title) {
-      item.title = `${preset?.name ?? 'Steam'} Mod`;
+    item.appId = appId || RIMWORLD_APP_ID;
+  }
+
+
+  async function persistPublishedFileId(id: number) {
+    const root = modRootPath || rimworldInfo?.modRoot || item.contentFolder;
+    if (!root || !id) return;
+    try {
+      const written = await invoke<string>('write_rimworld_published_file_id', {
+        req: {
+          modRoot: root,
+          publishedFileId: id,
+        },
+      });
+      addLog(`[RimWorld] Wrote PublishedFileId.txt → ${written}`, 'info');
+    } catch (err: any) {
+      addLog(`[RimWorld] Could not write PublishedFileId.txt: ${err}`, 'stderr');
     }
   }
 
@@ -385,6 +560,7 @@
         item.publishedFileId = publishedFileId;
         publishedFileIdInput = String(publishedFileId);
         rememberPublishedFileId(publishedFileId);
+        void persistPublishedFileId(publishedFileId);
         lastResult = needsLegalAgreement
           ? `SDK upload completed. PublishedFileID: ${publishedFileId}. Accept the Workshop legal agreement in Steam.`
           : `SDK upload completed. PublishedFileID: ${publishedFileId}`;
@@ -465,6 +641,7 @@
       item.publishedFileId = result.publishedFileId;
       publishedFileIdInput = String(result.publishedFileId);
       rememberPublishedFileId(result.publishedFileId);
+      await persistPublishedFileId(result.publishedFileId);
       uploadStatus = 'success';
       lastResult = result.needsLegalAgreement
         ? `SDK upload completed. PublishedFileID: ${result.publishedFileId}. Accept the Workshop legal agreement in Steam.`
@@ -484,6 +661,41 @@
     } else {
       await startSteamcmdUpload();
     }
+  }
+
+  /** One-click: pick folder if needed → detect → temp package → upload/update. */
+  async function oneClickRimWorldUpload() {
+    if (isUploading || isDetectingMod || isPackaging) return;
+
+    let path = modRootPath || item.contentFolder;
+    if (!path) {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: 'Select RimWorld mod folder (contains About/)',
+      });
+      if (!selected || typeof selected !== 'string') return;
+      path = selected;
+      const detected = await detectRimWorldFromPath(path);
+      if (!detected) return;
+      path = modRootPath || path;
+    }
+
+    // Prefer a fresh clean package for upload when enabled.
+    if (cleanPackage) {
+      const packaged = await generateTempPackage({ openAfter: false });
+      if (!packaged) return;
+    } else if (!item.title.trim() || !item.contentFolder.trim()) {
+      const detected = await detectRimWorldFromPath(path);
+      if (!detected) return;
+    }
+
+    if (!item.title.trim() || !item.contentFolder.trim()) {
+      alert('RimWorld mod detection did not produce a valid title/content folder.');
+      return;
+    }
+
+    await startUpload();
   }
 
   async function updateDescriptionOnly() {
@@ -704,7 +916,7 @@
 
   function resetForm() {
     item = {
-      appId: 252490,
+      appId: RIMWORLD_APP_ID,
       publishedFileId: undefined,
       contentFolder: '',
       previewFile: '',
@@ -719,6 +931,9 @@
     logs = [];
     uploadStatus = 'idle';
     lastResult = null;
+    modRootPath = '';
+    packagePath = '';
+    rimworldInfo = null;
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -750,9 +965,13 @@
     e.preventDefault();
     isDragging = false;
 
-    const file = e.dataTransfer?.files?.[0];
-    if (!file) return;
-
+    // Tauri/web file drops usually only expose the file name; fall back to picker.
+    // Prefer path when available (desktop webviews sometimes provide it).
+    const file = e.dataTransfer?.files?.[0] as File & { path?: string } | undefined;
+    if (file?.path) {
+      await detectRimWorldFromPath(file.path);
+      return;
+    }
     await selectContentFolder();
   }
 
@@ -767,6 +986,14 @@
     if (savedMethod === 'sdk' || savedMethod === 'steamcmd') {
       uploadMethod = savedMethod;
     }
+    const savedClean = localStorage.getItem(CLEAN_PACKAGE_KEY);
+    if (savedClean === '0' || savedClean === 'false') {
+      cleanPackage = false;
+    } else if (savedClean === '1' || savedClean === 'true') {
+      cleanPackage = true;
+    }
+    // Always default to RimWorld
+    item.appId = RIMWORLD_APP_ID;
     loadRememberedItemIds();
   });
 
@@ -778,6 +1005,10 @@
 
   $effect(() => {
     localStorage.setItem('uploadMethod', uploadMethod);
+  });
+
+  $effect(() => {
+    localStorage.setItem(CLEAN_PACKAGE_KEY, cleanPackage ? '1' : '0');
   });
 
   $effect(() => {
@@ -809,8 +1040,15 @@
         SW
       </div>
       <span class="font-semibold">Steam Workshop Uploader</span>
+      <span class="text-xs text-zinc-500 hidden sm:inline">· RimWorld</span>
     </div>
     <div class="flex items-center gap-2">
+      <div
+        class="px-3 py-0.5 text-xs bg-zinc-900 border border-zinc-700 rounded-full text-amber-400 flex items-center gap-1.5"
+      >
+        <span class="w-1.5 h-1.5 bg-amber-400 rounded-full"></span>
+        RimWorld
+      </div>
       <div
         class="px-3 py-0.5 text-xs bg-zinc-900 border border-zinc-700 rounded-full text-blue-400 flex items-center gap-1.5"
       >
@@ -845,12 +1083,12 @@
               <div class="text-sm font-semibold text-zinc-400 tracking-wider">
                 TARGET
               </div>
-              <div class="text-lg font-semibold">Steam App</div>
+              <div class="text-lg font-semibold">RimWorld Workshop</div>
             </div>
             <div
               class="text-xs px-2 py-1 bg-zinc-950 border border-zinc-800 rounded font-mono text-zinc-500"
             >
-              AppID
+              AppID {RIMWORLD_APP_ID}
             </div>
           </div>
 
@@ -883,25 +1121,23 @@
                 type="number"
                 bind:value={item.appId}
                 class="path-input w-full text-lg font-medium"
+                readonly
               />
             </div>
           </div>
 
           <div class="mt-3 text-xs text-zinc-500">
-            {#if selectedPreset}
-              Selected preset: <span class="text-zinc-300"
-                >{selectedPreset.name}</span
-              >
-            {:else}
-              Custom AppID
-            {/if}
+            Specialized for RimWorld mods: auto-reads
+            <span class="text-zinc-300">About/About.xml</span>,
+            <span class="text-zinc-300">Preview</span>, and
+            <span class="text-zinc-300">PublishedFileId.txt</span>.
           </div>
 
           <div class="mt-3">
             <label
               for="published-file-id"
               class="text-xs text-zinc-500 block mb-1.5"
-              >Published File ID (for updates)</label
+              >Published File ID (auto from About/PublishedFileId.txt)</label
             >
             <div class="flex gap-2">
               <input
@@ -974,45 +1210,204 @@
             handleDrop(e);
           }}
         >
-          <div class="text-sm font-semibold text-zinc-400 tracking-wider mb-3">
-            CONTENT FOLDER
+          <div class="flex items-center justify-between mb-3">
+            <div class="text-sm font-semibold text-zinc-400 tracking-wider">
+              RIMWORLD MOD FOLDER
+            </div>
+            <label class="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                bind:checked={cleanPackage}
+                class="rounded border-zinc-600 bg-zinc-900"
+              />
+              Upload via temp package
+            </label>
           </div>
 
           <button
             type="button"
             onclick={selectContentFolder}
-            class="group w-full border border-dashed border-zinc-700 hover:border-zinc-500 rounded-2xl p-7 flex flex-col items-center justify-center cursor-pointer transition-all bg-zinc-950/60 hover:bg-zinc-950 active:scale-[0.995]"
+            disabled={isDetectingMod || isPackaging}
+            class="group w-full border border-dashed border-zinc-700 hover:border-zinc-500 rounded-2xl p-7 flex flex-col items-center justify-center cursor-pointer transition-all bg-zinc-950/60 hover:bg-zinc-950 active:scale-[0.995] disabled:opacity-60"
           >
             <div
               class="w-10 h-10 rounded-2xl bg-zinc-800 group-hover:bg-zinc-700 flex items-center justify-center mb-3"
             >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                class="w-5 h-5 text-zinc-400"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                ><path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
-                /></svg
-              >
+              {#if isDetectingMod}
+                <span
+                  class="w-5 h-5 border-2 border-zinc-500 border-t-zinc-200 rounded-full animate-spin"
+                ></span>
+              {:else}
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  class="w-5 h-5 text-zinc-400"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  ><path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
+                  /></svg
+                >
+              {/if}
             </div>
             <div class="font-medium text-sm">
-              Drop folder here or click to browse
+              {isDetectingMod
+                ? 'Scanning About.xml…'
+                : 'Drop mod folder or click to browse'}
             </div>
-            <div class="text-xs text-zinc-500 mt-1">
-              All files inside this folder will be uploaded
+            <div class="text-xs text-zinc-500 mt-1 text-center max-w-sm">
+              Auto-fills title, description, preview &amp; Workshop ID from
+              <span class="text-zinc-400">About/</span>
             </div>
           </button>
 
-          {#if item.contentFolder}
+          {#if modRootPath || item.contentFolder}
             <div
-              class="mt-3 text-xs font-mono bg-zinc-950 border border-emerald-900/60 text-emerald-400 rounded-xl px-4 py-2 truncate"
+              class="mt-3 text-xs font-mono bg-zinc-950 border border-zinc-700 text-zinc-300 rounded-xl px-4 py-2 truncate"
+              title={modRootPath || item.contentFolder}
             >
-              {item.contentFolder}
+              <span class="text-zinc-500">Mod · </span
+              >{modRootPath || item.contentFolder}
+            </div>
+          {/if}
+
+          <!-- Temp package actions (after mod selected) -->
+          {#if modRootPath || item.contentFolder}
+            <div
+              class="mt-3 rounded-xl border border-zinc-800 bg-zinc-950/80 p-3 space-y-2.5"
+            >
+              <div class="flex items-center justify-between gap-2">
+                <div class="text-xs font-semibold tracking-wide text-zinc-400">
+                  TEMP UPLOAD PACKAGE
+                </div>
+                {#if hasTempPackage}
+                  <span
+                    class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/25"
+                    >Ready</span
+                  >
+                {:else}
+                  <span
+                    class="text-[10px] px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-500 border border-zinc-700"
+                    >Not generated</span
+                  >
+                {/if}
+              </div>
+              <div class="text-[11px] text-zinc-500 leading-relaxed">
+                Copies the mod into a clean temp folder (drops Source / .git /
+                bin / obj / project files). Upload uses this folder.
+              </div>
+              <div class="flex gap-2">
+                <button
+                  type="button"
+                  onclick={() => generateTempPackage({ openAfter: true })}
+                  disabled={isPackaging || isDetectingMod || isUploading}
+                  class="btn-primary text-xs flex-1 py-2.5 disabled:opacity-50"
+                >
+                  {#if isPackaging}
+                    <span class="inline-flex items-center gap-2">
+                      <span
+                        class="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"
+                      ></span>
+                      Generating…
+                    </span>
+                  {:else}
+                    {hasTempPackage
+                      ? 'Regenerate temp package'
+                      : 'Generate temp package'}
+                  {/if}
+                </button>
+                <button
+                  type="button"
+                  onclick={() => openPackageInFileManager()}
+                  disabled={!hasTempPackage || isPackaging}
+                  class="btn-secondary text-xs px-3 whitespace-nowrap disabled:opacity-50"
+                  title="Open temp package in system file manager"
+                >
+                  Open folder
+                </button>
+              </div>
+              {#if packagePath}
+                <button
+                  type="button"
+                  class="w-full text-left text-[11px] font-mono bg-zinc-900 border border-emerald-900/50 text-emerald-400 rounded-lg px-3 py-2 truncate hover:border-emerald-700 transition"
+                  title="Click to open: {packagePath}"
+                  onclick={() => openPackageInFileManager(packagePath)}
+                >
+                  {packagePath}
+                </button>
+              {/if}
+            </div>
+          {/if}
+
+          <div class="mt-3 flex gap-2">
+            <button
+              type="button"
+              onclick={rescanRimWorldMod}
+              disabled={isDetectingMod ||
+                isPackaging ||
+                (!modRootPath && !item.contentFolder)}
+              class="btn-secondary text-xs flex-1 disabled:opacity-50"
+            >
+              {isDetectingMod ? 'Scanning…' : 'Rescan mod'}
+            </button>
+            <button
+              type="button"
+              onclick={oneClickRimWorldUpload}
+              disabled={isUploading || isDetectingMod || isPackaging}
+              class="btn-primary text-xs flex-1 py-2 disabled:opacity-50"
+            >
+              One-click upload / update
+            </button>
+          </div>
+
+          {#if rimworldInfo}
+            <div
+              class="mt-3 rounded-xl border border-zinc-800 bg-zinc-950/70 p-3 text-xs space-y-1.5"
+            >
+              <div class="flex justify-between gap-3">
+                <span class="text-zinc-500">packageId</span>
+                <span class="text-zinc-300 font-mono truncate"
+                  >{rimworldInfo.packageId || '—'}</span
+                >
+              </div>
+              {#if rimworldInfo.author}
+                <div class="flex justify-between gap-3">
+                  <span class="text-zinc-500">author</span>
+                  <span class="text-zinc-300 truncate">{rimworldInfo.author}</span>
+                </div>
+              {/if}
+              <div class="flex justify-between gap-3">
+                <span class="text-zinc-500">versions</span>
+                <span class="text-zinc-300"
+                  >{rimworldInfo.supportedVersions.join(', ') || '—'}</span
+                >
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-zinc-500">mode</span>
+                <span class="text-zinc-300">
+                  {rimworldInfo.publishedFileId
+                    ? `Update #${rimworldInfo.publishedFileId}`
+                    : 'New upload'}
+                  {hasTempPackage ? ' · temp package' : ''}
+                </span>
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-zinc-500">upload path</span>
+                <span
+                  class="text-zinc-300 font-mono truncate max-w-[14rem]"
+                  title={item.contentFolder}>{item.contentFolder || '—'}</span
+                >
+              </div>
+              {#if rimworldInfo.warnings.length > 0}
+                <div class="pt-1 border-t border-zinc-800 text-amber-400/90 space-y-0.5">
+                  {#each rimworldInfo.warnings as warning}
+                    <div>· {warning}</div>
+                  {/each}
+                </div>
+              {/if}
             </div>
           {/if}
         </div>
@@ -1025,16 +1420,19 @@
             <div
               class="text-sm font-semibold text-zinc-400 tracking-wider mb-2"
             >
-              PREVIEW IMAGE
+              PREVIEW / COVER
             </div>
             <button
               onclick={selectPreviewFile}
               class="w-full border border-dashed border-zinc-700 hover:border-zinc-500 rounded-2xl py-4 text-sm flex items-center justify-center gap-2 text-zinc-400 transition-colors"
             >
-              Choose preview image (jpg/png)
+              {item.previewFile
+                ? 'Change preview image'
+                : 'Auto: About/Preview.png (or pick)'}
             </button>
             {#if item.previewFile}<div
                 class="text-[11px] mt-1.5 font-mono text-emerald-400 truncate"
+                title={item.previewFile}
               >
                 {item.previewFile}
               </div>{/if}
@@ -1062,8 +1460,8 @@
             </div>
             <textarea
               bind:value={item.description}
-              rows={3}
-              placeholder="What does this mod do?"
+              rows={6}
+              placeholder="Filled from About/About.xml <description>"
               class="path-input w-full"
             ></textarea>
             <div class="mt-2">
@@ -1210,8 +1608,8 @@
             {/if}
 
             <button
-              onclick={startUpload}
-              disabled={!canUpload}
+              onclick={oneClickRimWorldUpload}
+              disabled={isUploading || isDetectingMod || isPackaging}
               class="btn-primary py-4 text-[15px]"
             >
               {#if isUploading}
@@ -1221,11 +1619,21 @@
                   ></span>
                   Uploading…
                 </span>
+              {:else if isPackaging}
+                Generating package…
+              {:else if isDetectingMod}
+                Scanning mod…
               {:else}
-                ↑ Upload with {uploadMethod === 'sdk'
-                  ? 'Steamworks SDK'
-                  : 'steamcmd'}
+                ↑ One-click RimWorld upload / update
               {/if}
+            </button>
+
+            <button
+              onclick={startUpload}
+              disabled={!canUpload}
+              class="w-full py-3 font-semibold rounded-2xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 disabled:opacity-50 transition active:scale-[0.985]"
+            >
+              Upload form as-is ({uploadMethod === 'sdk' ? 'SDK' : 'steamcmd'})
             </button>
 
             <button

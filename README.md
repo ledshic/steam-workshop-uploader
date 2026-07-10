@@ -1,25 +1,25 @@
-# Steam Workshop Uploader (RimWorld)
+# Steam Workshop Uploader (RimWorld + Bannerlord)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A cross-platform desktop app (Windows / macOS / Linux) built with **Tauri v2 + Rust + Svelte 5** for uploading **RimWorld** mods to the Steam Workshop. Uses the Steamworks SDK by default, with `steamcmd` as a fallback.
+A cross-platform desktop app (Windows / macOS / Linux) built with **Tauri v2 + Rust + Svelte 5** for uploading **RimWorld** and **Bannerlord** mods to the Steam Workshop. Uses the Steamworks SDK by default, with `steamcmd` as a fallback.
 
 ## Features
 
-- **RimWorld-first workflow** (AppID `294100`)
-- **Auto-detect mod structure** from `About/About.xml`
-  - Title from `<name>`
-  - Workshop description from `<description>`
-  - Tags from `Mod` + `<supportedVersions>`
-  - Cover/preview from `About/Preview.png` (or `.jpg` / `ModIcon.png`)
-  - Update ID from `About/PublishedFileId.txt`
-- **Temp upload package**: after selecting a mod, one-click generate a clean temp folder (excludes `Source/`, `.git/`, `bin/`, `obj/`, `.sln`, `.csproj`, …) used for upload
-- **Preview package** in the system file manager (Finder / Explorer)
-- **One-click upload / update** — pick folder → detect → temp package → upload
-- Writes `About/PublishedFileId.txt` after a successful first upload so the next run is an update
-- Live console output from Steamworks SDK or steamcmd
-- Optional VDF generation + steamcmd fallback
-- Description-only / preview-only update helpers (SDK mode)
+- **Game presets**
+  - RimWorld — AppID `294100`
+  - Bannerlord — AppID `261550`
+- **RimWorld auto-detect** from `About/About.xml`
+  - Title / description / versions / `Preview.png` / `PublishedFileId.txt`
+- **Bannerlord auto-detect** from `SubModule.xml` (and common repo layouts)
+  - Prefers ship-ready `out/ModuleId/` or module root with `SubModule.xml`
+  - Name / Id / Version / dependencies / README description
+  - Preview from `Image.png` or `_Workshop/*.png`
+  - Workshop id from `WorkshopItemId.txt` or `WorkshopUpdate.xml` ItemId
+- **Temp upload package** + open in system file manager
+- **One-click upload / update**
+- Light / dark / system Dock icons (Settings)
+- Live console, steamcmd fallback, description/preview-only updates
 
 ## Prerequisites
 
@@ -45,27 +45,12 @@ pnpm tauri build
 
 Bundled app output: `src-tauri/target/release/bundle/`.
 
-## How to Use (RimWorld)
+## How to Use
 
-### One-click path
-
-1. Start Steam and log into the account that owns the Workshop item (or has permission to publish)
-2. Keep **Steamworks SDK** selected in Settings
-3. Click **One-click RimWorld upload / update**
-4. Select your mod root folder (the folder that contains `About/`)
-5. The app:
-   - Parses `About/About.xml` for title & description
-   - Picks `About/Preview.png` as the Workshop cover
-   - Reads `About/PublishedFileId.txt` if present (update) or creates a new item
-   - Optionally builds a clean package (default on)
-   - Uploads / updates via Steamworks SDK
-   - Writes `PublishedFileId.txt` after a successful new upload
-
-### Manual path
-
-1. Browse the mod folder (auto-fill still runs)
-2. Edit title / description / tags if needed
-3. Click **Upload form as-is**
+1. Start Steam and log in
+2. Pick **RimWorld** or **Bannerlord** in the Game selector
+3. **One-click upload / update** → select the mod/module folder
+4. Or: browse folder → **Generate temp package** → preview in Finder → upload
 
 ### steamcmd fallback
 
@@ -74,29 +59,64 @@ Bundled app output: `src-tauri/target/release/bundle/`.
 3. `Generate workshop.vdf` then **Upload form as-is**
 4. First-time login: `steamcmd +login YOUR_STEAM_USERNAME`
 
-## Expected mod layout
+## Expected layouts
+
+### RimWorld
 
 ```
 MyMod/
   About/
-    About.xml            # required — name, description, versions
-    Preview.png          # preferred Workshop cover
-    PublishedFileId.txt  # optional — present after first upload
-    ModIcon.png          # fallback cover if Preview is missing
-  Assemblies/ …
-  Defs/ …
-  …
+    About.xml
+    Preview.png
+    PublishedFileId.txt   # optional
+  Assemblies/ Defs/ …
 ```
 
-Clean packaging keeps Workshop content lean by skipping developer folders such as `Source/`, `.git/`, `bin/`, `obj/`.
+### Bannerlord (rules from workspace modules)
+
+**Ship-ready module (preferred upload content):**
+
+```
+ModuleId/                         # e.g. out/Bannerlord.AutoAmmoPickup/
+  SubModule.xml                   # required — Name / Id / Version / deps
+  bin/Win64_Shipping_Client/      # required for code mods — *.dll
+  ModuleData/                     # optional — languages, XML
+  GUI/ AssetPackages/ …           # optional assets
+```
+
+**Common repo layouts (detected, not all upload-ready as-is):**
+
+```
+Repo/
+  out/ModuleId/          # preferred build output → selected automatically
+  _Module/               # template / partial module
+  _Workshop/             # previews + WorkshopUpdate.xml (not module content)
+  dev/ src/ .git/        # excluded from clean package
+```
+
+**SubModule.xml fields used:**
+
+| Field | Use |
+|-------|-----|
+| `<Name value="…"/>` | Workshop title |
+| `<Id value="…"/>` | Module id |
+| `<Version value="v…"/>` | Change note / tags |
+| `<DependedModule Id="…"/>` | Listed in description |
+| Singleplayer / Multiplayer | Tags |
+
+**Workshop id sources:** `WorkshopItemId.txt`, `PublishedFileId.txt`, or `_Workshop/WorkshopUpdate.xml` → `<ItemId Value="…"/>`.
+
+**Preview sources:** module `Image.png` / `Preview.png`, else first suitable `_Workshop/*.png`.
+
+Clean packaging **keeps** `bin/Win64_Shipping_Client`, and **drops** `src/`, `dev/`, `.git/`, `.pdb`, `.cs`, `_Workshop/`, project files.
 
 ## Architecture Notes
 
-- RimWorld detection & packaging: `src-tauri/src/rimworld.rs`
-- Steamworks SDK uploads: `src-tauri/src/steamworks.rs`
-- VDF generation + steamcmd spawn: `src-tauri/src/lib.rs`
+- RimWorld: `src-tauri/src/rimworld.rs`
+- Bannerlord: `src-tauri/src/bannerlord.rs`
+- Steamworks SDK: `src-tauri/src/steamworks.rs`
+- Dock icons: `src-tauri/src/app_icon.rs`
 - UI: `src/routes/+page.svelte`
-- Tauri v2 plugins: dialog, fs, shell, store
 
 ## Future Improvements
 

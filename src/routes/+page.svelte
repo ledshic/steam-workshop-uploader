@@ -87,15 +87,43 @@
     isPackaged: boolean;
   }
 
+  interface BannerlordModInfo {
+    modRoot: string;
+    contentFolder: string;
+    submoduleXmlPath: string;
+    name: string;
+    moduleId: string;
+    version?: string;
+    description: string;
+    singleplayer: boolean;
+    multiplayer: boolean;
+    dependedModules: string[];
+    previewFile?: string;
+    publishedFileId?: number;
+    publishedFileIdPath?: string;
+    tags: string[];
+    warnings: string[];
+    detectedFiles: string[];
+    isPackaged: boolean;
+  }
+
+  type GamePresetId = 'rimworld' | 'bannerlord';
   type UploadMethod = 'sdk' | 'steamcmd';
 
-  /** App is specialized for RimWorld Workshop uploads. */
   const RIMWORLD_APP_ID = 294100;
-  const APP_PRESETS = [{ id: RIMWORLD_APP_ID, name: 'RimWorld' }];
+  const BANNERLORD_APP_ID = 261550;
+  const APP_PRESETS = [
+    { id: RIMWORLD_APP_ID, name: 'RimWorld', game: 'rimworld' as GamePresetId },
+    {
+      id: BANNERLORD_APP_ID,
+      name: 'Bannerlord',
+      game: 'bannerlord' as GamePresetId,
+    },
+  ];
   const VISIBILITY_LABELS = ['Public', 'Friends Only', 'Private'];
   const ITEM_ID_HISTORY_KEY = 'publishedFileIdHistory';
   const ITEM_ID_HISTORY_MAX = 30;
-  const CLEAN_PACKAGE_KEY = 'rimworldCleanPackage';
+  const CLEAN_PACKAGE_KEY = 'modCleanPackage';
   const ICON_THEME_KEY = 'appIconTheme';
   type IconThemePref = 'light' | 'dark' | 'system';
   const STEAM_LANGUAGE_OPTIONS = [
@@ -153,8 +181,17 @@
   let modRootPath = $state('');
   let packagePath = $state('');
   let rimworldInfo = $state<RimWorldModInfo | null>(null);
+  let bannerlordInfo = $state<BannerlordModInfo | null>(null);
   let hasTempPackage = $derived(
-    Boolean(packagePath) || Boolean(rimworldInfo?.isPackaged),
+    Boolean(packagePath) ||
+      Boolean(rimworldInfo?.isPackaged) ||
+      Boolean(bannerlordInfo?.isPackaged),
+  );
+  let activeGame = $derived<GamePresetId>(
+    Number(item.appId) === BANNERLORD_APP_ID ? 'bannerlord' : 'rimworld',
+  );
+  let gameLabel = $derived(
+    activeGame === 'bannerlord' ? 'Bannerlord' : 'RimWorld',
   );
   /** Dock / window icon: light (default), dark, or follow OS. */
   let iconTheme = $state<IconThemePref>('light');
@@ -276,6 +313,7 @@
 
   function applyRimWorldInfo(info: RimWorldModInfo, opts?: { keepPackage?: boolean }) {
     rimworldInfo = info;
+    bannerlordInfo = null;
     modRootPath = info.modRoot;
     item.appId = RIMWORLD_APP_ID;
     item.contentFolder = info.contentFolder;
@@ -310,24 +348,74 @@
     );
   }
 
+  function applyBannerlordInfo(
+    info: BannerlordModInfo,
+    opts?: { keepPackage?: boolean },
+  ) {
+    bannerlordInfo = info;
+    rimworldInfo = null;
+    modRootPath = info.modRoot;
+    item.appId = BANNERLORD_APP_ID;
+    item.contentFolder = info.contentFolder;
+    item.title = info.name;
+    item.description = info.description;
+    item.previewFile = info.previewFile || '';
+    item.tags = info.tags.length > 0 ? [...info.tags] : ['Mod', 'Utility'];
+    if (info.version && !item.changeNote) {
+      item.changeNote = info.version;
+    }
+
+    if (info.isPackaged) {
+      packagePath = info.contentFolder;
+    } else if (!opts?.keepPackage) {
+      packagePath = '';
+    }
+
+    if (info.publishedFileId) {
+      item.publishedFileId = info.publishedFileId;
+      publishedFileIdInput = String(info.publishedFileId);
+      rememberPublishedFileId(info.publishedFileId);
+    }
+
+    for (const warning of info.warnings) {
+      addLog(`[Bannerlord] ${warning}`, 'info');
+    }
+    addLog(
+      `[Bannerlord] Detected "${info.name}" (${info.moduleId})` +
+        (info.version ? ` ${info.version}` : '') +
+        (info.publishedFileId
+          ? ` → update #${info.publishedFileId}`
+          : ' → new upload') +
+        (info.isPackaged ? ' [temp package]' : ''),
+      'info',
+    );
+  }
+
   /** Scan mod metadata only — does not create a temp upload package. */
-  async function detectRimWorldFromPath(
-    path: string,
-  ): Promise<RimWorldModInfo | null> {
+  async function detectModFromPath(path: string): Promise<boolean> {
     isDetectingMod = true;
     try {
+      if (activeGame === 'bannerlord') {
+        addLog('[Bannerlord] Scanning SubModule.xml / module layout...', 'info');
+        const info = await invoke<BannerlordModInfo>('detect_bannerlord_mod', {
+          path,
+        });
+        applyBannerlordInfo(info);
+        return true;
+      }
       addLog('[RimWorld] Scanning mod structure...', 'info');
       const info = await invoke<RimWorldModInfo>('detect_rimworld_mod', { path });
       applyRimWorldInfo(info);
-      return info;
+      return true;
     } catch (err: any) {
-      addLog(`[RimWorld] Detect failed: ${err}`, 'stderr');
+      addLog(`[${gameLabel}] Detect failed: ${err}`, 'stderr');
       item.contentFolder = path;
       modRootPath = path;
       packagePath = '';
       rimworldInfo = null;
-      alert(`RimWorld detect failed: ${err}`);
-      return null;
+      bannerlordInfo = null;
+      alert(`${gameLabel} detect failed: ${err}`);
+      return false;
     } finally {
       isDetectingMod = false;
     }
@@ -339,35 +427,46 @@
    */
   async function generateTempPackage(
     options: { openAfter?: boolean } = { openAfter: true },
-  ): Promise<RimWorldModInfo | null> {
+  ): Promise<boolean> {
     const path = modRootPath || item.contentFolder;
     if (!path) {
-      alert('Please select a RimWorld mod folder first.');
-      return null;
+      alert(`Please select a ${gameLabel} mod/module folder first.`);
+      return false;
     }
-    if (isPackaging || isDetectingMod) return null;
+    if (isPackaging || isDetectingMod) return false;
 
     isPackaging = true;
     try {
       addLog(
-        '[RimWorld] Generating temp upload package (excluding Source/VCS/build)...',
+        `[${gameLabel}] Generating temp upload package...`,
         'info',
       );
+      if (activeGame === 'bannerlord') {
+        const info = await invoke<BannerlordModInfo>('prepare_bannerlord_package', {
+          req: { modRoot: path },
+        });
+        applyBannerlordInfo(info);
+        packagePath = info.contentFolder;
+        addLog(`[Bannerlord] Temp package ready: ${info.contentFolder}`, 'info');
+        if (options.openAfter !== false) {
+          await openPackageInFileManager(info.contentFolder);
+        }
+        return true;
+      }
       const info = await invoke<RimWorldModInfo>('prepare_rimworld_package', {
         req: { modRoot: path },
       });
       applyRimWorldInfo(info);
       packagePath = info.contentFolder;
       addLog(`[RimWorld] Temp package ready: ${info.contentFolder}`, 'info');
-
       if (options.openAfter !== false) {
         await openPackageInFileManager(info.contentFolder);
       }
-      return info;
+      return true;
     } catch (err: any) {
-      addLog(`[RimWorld] Package failed: ${err}`, 'stderr');
+      addLog(`[${gameLabel}] Package failed: ${err}`, 'stderr');
       alert(`Failed to generate temp package: ${err}`);
-      return null;
+      return false;
     } finally {
       isPackaging = false;
     }
@@ -380,16 +479,15 @@
       return;
     }
     try {
-      // Prefer opening the folder itself in Finder / Explorer / file manager.
       await openPath(path);
-      addLog(`[RimWorld] Opened package folder: ${path}`, 'info');
+      addLog(`[${gameLabel}] Opened package folder: ${path}`, 'info');
     } catch (openErr: any) {
       try {
         await revealItemInDir(path);
-        addLog(`[RimWorld] Revealed package in file manager: ${path}`, 'info');
+        addLog(`[${gameLabel}] Revealed package in file manager: ${path}`, 'info');
       } catch (revealErr: any) {
         addLog(
-          `[RimWorld] Could not open file manager: ${openErr}; ${revealErr}`,
+          `[${gameLabel}] Could not open file manager: ${openErr}; ${revealErr}`,
           'stderr',
         );
         alert(`Could not open file manager:\n${openErr}`);
@@ -398,29 +496,27 @@
   }
 
   async function selectContentFolder() {
+    const title =
+      activeGame === 'bannerlord'
+        ? 'Select Bannerlord module (SubModule.xml or out/ModuleId)'
+        : 'Select RimWorld mod folder (contains About/)';
     const selected = await open({
       directory: true,
       multiple: false,
-      title: 'Select RimWorld mod folder (contains About/)',
+      title,
     });
     if (selected && typeof selected === 'string') {
-      await detectRimWorldFromPath(selected);
+      await detectModFromPath(selected);
     }
   }
 
-  async function rescanRimWorldMod() {
+  async function rescanMod() {
     const path = modRootPath || item.contentFolder;
     if (!path) {
       await selectContentFolder();
       return;
     }
-    // Rescan metadata only; keep existing temp package if any until regenerated.
-    const previousPackage = packagePath;
-    const info = await detectRimWorldFromPath(path);
-    if (info && previousPackage && !info.isPackaged) {
-      // Restore upload target to previous package if still desired
-      // User must regenerate to refresh package contents.
-    }
+    await detectModFromPath(path);
   }
 
   async function selectPreviewFile() {
@@ -437,6 +533,10 @@
 
   function setPreset(appId: number) {
     item.appId = appId || RIMWORLD_APP_ID;
+    // Clear game-specific detection when switching presets
+    rimworldInfo = null;
+    bannerlordInfo = null;
+    packagePath = '';
   }
 
   function systemPrefersDark(): boolean {
@@ -468,18 +568,26 @@
   }
 
   async function persistPublishedFileId(id: number) {
-    const root = modRootPath || rimworldInfo?.modRoot || item.contentFolder;
+    const root =
+      modRootPath ||
+      rimworldInfo?.modRoot ||
+      bannerlordInfo?.modRoot ||
+      item.contentFolder;
     if (!root || !id) return;
     try {
-      const written = await invoke<string>('write_rimworld_published_file_id', {
-        req: {
-          modRoot: root,
-          publishedFileId: id,
-        },
-      });
-      addLog(`[RimWorld] Wrote PublishedFileId.txt → ${written}`, 'info');
+      if (activeGame === 'bannerlord') {
+        const written = await invoke<string>('write_bannerlord_published_file_id', {
+          req: { modRoot: root, publishedFileId: id },
+        });
+        addLog(`[Bannerlord] Wrote WorkshopItemId.txt → ${written}`, 'info');
+      } else {
+        const written = await invoke<string>('write_rimworld_published_file_id', {
+          req: { modRoot: root, publishedFileId: id },
+        });
+        addLog(`[RimWorld] Wrote PublishedFileId.txt → ${written}`, 'info');
+      }
     } catch (err: any) {
-      addLog(`[RimWorld] Could not write PublishedFileId.txt: ${err}`, 'stderr');
+      addLog(`[${gameLabel}] Could not write workshop id file: ${err}`, 'stderr');
     }
   }
 
@@ -696,34 +804,39 @@
   }
 
   /** One-click: pick folder if needed → detect → temp package → upload/update. */
-  async function oneClickRimWorldUpload() {
+  async function oneClickUpload() {
     if (isUploading || isDetectingMod || isPackaging) return;
 
     let path = modRootPath || item.contentFolder;
     if (!path) {
+      const title =
+        activeGame === 'bannerlord'
+          ? 'Select Bannerlord module (SubModule.xml or out/ModuleId)'
+          : 'Select RimWorld mod folder (contains About/)';
       const selected = await open({
         directory: true,
         multiple: false,
-        title: 'Select RimWorld mod folder (contains About/)',
+        title,
       });
       if (!selected || typeof selected !== 'string') return;
       path = selected;
-      const detected = await detectRimWorldFromPath(path);
+      const detected = await detectModFromPath(path);
       if (!detected) return;
       path = modRootPath || path;
     }
 
-    // Prefer a fresh clean package for upload when enabled.
     if (cleanPackage) {
       const packaged = await generateTempPackage({ openAfter: false });
       if (!packaged) return;
     } else if (!item.title.trim() || !item.contentFolder.trim()) {
-      const detected = await detectRimWorldFromPath(path);
+      const detected = await detectModFromPath(path);
       if (!detected) return;
     }
 
     if (!item.title.trim() || !item.contentFolder.trim()) {
-      alert('RimWorld mod detection did not produce a valid title/content folder.');
+      alert(
+        `${gameLabel} detection did not produce a valid title/content folder.`,
+      );
       return;
     }
 
@@ -966,6 +1079,7 @@
     modRootPath = '';
     packagePath = '';
     rimworldInfo = null;
+    bannerlordInfo = null;
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -1001,7 +1115,7 @@
     // Prefer path when available (desktop webviews sometimes provide it).
     const file = e.dataTransfer?.files?.[0] as File & { path?: string } | undefined;
     if (file?.path) {
-      await detectRimWorldFromPath(file.path);
+      await detectModFromPath(file.path);
       return;
     }
     await selectContentFolder();
@@ -1028,8 +1142,9 @@
     if (savedIcon === 'light' || savedIcon === 'dark' || savedIcon === 'system') {
       iconTheme = savedIcon;
     }
-    // Always default to RimWorld
-    item.appId = RIMWORLD_APP_ID;
+    if (!APP_PRESETS.some(p => p.id === item.appId)) {
+      item.appId = RIMWORLD_APP_ID;
+    }
     loadRememberedItemIds();
     void applyIconTheme(iconTheme);
 
@@ -1094,14 +1209,14 @@
         SW
       </div>
       <span class="font-semibold">Steam Workshop Uploader</span>
-      <span class="text-xs text-zinc-500 hidden sm:inline">· RimWorld</span>
+      <span class="text-xs text-zinc-500 hidden sm:inline">· {gameLabel}</span>
     </div>
     <div class="flex items-center gap-2">
       <div
         class="px-3 py-0.5 text-xs bg-zinc-900 border border-zinc-700 rounded-full text-amber-400 flex items-center gap-1.5"
       >
         <span class="w-1.5 h-1.5 bg-amber-400 rounded-full"></span>
-        RimWorld
+        {gameLabel}
       </div>
       <div
         class="px-3 py-0.5 text-xs bg-zinc-900 border border-zinc-700 rounded-full text-blue-400 flex items-center gap-1.5"
@@ -1137,12 +1252,12 @@
               <div class="text-sm font-semibold text-zinc-400 tracking-wider">
                 TARGET
               </div>
-              <div class="text-lg font-semibold">RimWorld Workshop</div>
+              <div class="text-lg font-semibold">{gameLabel} Workshop</div>
             </div>
             <div
               class="text-xs px-2 py-1 bg-zinc-950 border border-zinc-800 rounded font-mono text-zinc-500"
             >
-              AppID {RIMWORLD_APP_ID}
+              AppID {item.appId}
             </div>
           </div>
 
@@ -1175,23 +1290,32 @@
                 type="number"
                 bind:value={item.appId}
                 class="path-input w-full text-lg font-medium"
-                readonly
               />
             </div>
           </div>
 
           <div class="mt-3 text-xs text-zinc-500">
-            Specialized for RimWorld mods: auto-reads
-            <span class="text-zinc-300">About/About.xml</span>,
-            <span class="text-zinc-300">Preview</span>, and
-            <span class="text-zinc-300">PublishedFileId.txt</span>.
+            {#if activeGame === 'bannerlord'}
+              Auto-reads
+              <span class="text-zinc-300">SubModule.xml</span>,
+              <span class="text-zinc-300">bin/Win64_Shipping_Client</span>,
+              preview, and Workshop ItemId.
+            {:else}
+              Auto-reads
+              <span class="text-zinc-300">About/About.xml</span>,
+              <span class="text-zinc-300">Preview</span>, and
+              <span class="text-zinc-300">PublishedFileId.txt</span>.
+            {/if}
           </div>
 
           <div class="mt-3">
             <label
               for="published-file-id"
               class="text-xs text-zinc-500 block mb-1.5"
-              >Published File ID (auto from About/PublishedFileId.txt)</label
+              >Published File ID (auto from
+              {activeGame === 'bannerlord'
+                ? 'WorkshopItemId / WorkshopUpdate.xml'
+                : 'About/PublishedFileId.txt'})</label
             >
             <div class="flex gap-2">
               <input
@@ -1266,7 +1390,7 @@
         >
           <div class="flex items-center justify-between mb-3">
             <div class="text-sm font-semibold text-zinc-400 tracking-wider">
-              RIMWORLD MOD FOLDER
+              {activeGame === 'bannerlord' ? 'BANNERLORD MODULE' : 'RIMWORLD MOD FOLDER'}
             </div>
             <label class="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer select-none">
               <input
@@ -1309,12 +1433,20 @@
             </div>
             <div class="font-medium text-sm">
               {isDetectingMod
-                ? 'Scanning About.xml…'
+                ? activeGame === 'bannerlord'
+                  ? 'Scanning SubModule.xml…'
+                  : 'Scanning About.xml…'
                 : 'Drop mod folder or click to browse'}
             </div>
             <div class="text-xs text-zinc-500 mt-1 text-center max-w-sm">
-              Auto-fills title, description, preview &amp; Workshop ID from
-              <span class="text-zinc-400">About/</span>
+              {#if activeGame === 'bannerlord'}
+                Auto-fills from
+                <span class="text-zinc-400">SubModule.xml</span>
+                (prefers <span class="text-zinc-400">out/ModuleId</span>)
+              {:else}
+                Auto-fills title, description, preview &amp; Workshop ID from
+                <span class="text-zinc-400">About/</span>
+              {/if}
             </div>
           </button>
 
@@ -1350,8 +1482,14 @@
                 {/if}
               </div>
               <div class="text-[11px] text-zinc-500 leading-relaxed">
-                Copies the mod into a clean temp folder (drops Source / .git /
-                bin / obj / project files). Upload uses this folder.
+                {#if activeGame === 'bannerlord'}
+                  Copies the module folder (keeps
+                  <span class="text-zinc-400">bin/Win64_Shipping_Client</span>,
+                  drops src/dev/.git/.pdb). Upload uses this folder.
+                {:else}
+                  Copies the mod into a clean temp folder (drops Source / .git /
+                  bin / obj / project files). Upload uses this folder.
+                {/if}
               </div>
               <div class="flex gap-2">
                 <button
@@ -1399,7 +1537,7 @@
           <div class="mt-3 flex gap-2">
             <button
               type="button"
-              onclick={rescanRimWorldMod}
+              onclick={rescanMod}
               disabled={isDetectingMod ||
                 isPackaging ||
                 (!modRootPath && !item.contentFolder)}
@@ -1409,7 +1547,7 @@
             </button>
             <button
               type="button"
-              onclick={oneClickRimWorldUpload}
+              onclick={oneClickUpload}
               disabled={isUploading || isDetectingMod || isPackaging}
               class="btn-primary text-xs flex-1 py-2 disabled:opacity-50"
             >
@@ -1458,6 +1596,57 @@
               {#if rimworldInfo.warnings.length > 0}
                 <div class="pt-1 border-t border-zinc-800 text-amber-400/90 space-y-0.5">
                   {#each rimworldInfo.warnings as warning}
+                    <div>· {warning}</div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/if}
+
+          {#if bannerlordInfo}
+            <div
+              class="mt-3 rounded-xl border border-zinc-800 bg-zinc-950/70 p-3 text-xs space-y-1.5"
+            >
+              <div class="flex justify-between gap-3">
+                <span class="text-zinc-500">module Id</span>
+                <span class="text-zinc-300 font-mono truncate"
+                  >{bannerlordInfo.moduleId}</span
+                >
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-zinc-500">version</span>
+                <span class="text-zinc-300">{bannerlordInfo.version || '—'}</span>
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-zinc-500">deps</span>
+                <span
+                  class="text-zinc-300 truncate max-w-[14rem]"
+                  title={bannerlordInfo.dependedModules.join(', ')}
+                  >{bannerlordInfo.dependedModules.slice(0, 4).join(', ') || '—'}
+                  {bannerlordInfo.dependedModules.length > 4
+                    ? ` +${bannerlordInfo.dependedModules.length - 4}`
+                    : ''}</span
+                >
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-zinc-500">mode</span>
+                <span class="text-zinc-300">
+                  {bannerlordInfo.publishedFileId
+                    ? `Update #${bannerlordInfo.publishedFileId}`
+                    : 'New upload'}
+                  {hasTempPackage ? ' · temp package' : ''}
+                </span>
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-zinc-500">upload path</span>
+                <span
+                  class="text-zinc-300 font-mono truncate max-w-[14rem]"
+                  title={item.contentFolder}>{item.contentFolder || '—'}</span
+                >
+              </div>
+              {#if bannerlordInfo.warnings.length > 0}
+                <div class="pt-1 border-t border-zinc-800 text-amber-400/90 space-y-0.5">
+                  {#each bannerlordInfo.warnings as warning}
                     <div>· {warning}</div>
                   {/each}
                 </div>
@@ -1515,7 +1704,9 @@
             <textarea
               bind:value={item.description}
               rows={6}
-              placeholder="Filled from About/About.xml <description>"
+              placeholder={activeGame === 'bannerlord'
+                ? 'Filled from README.md or SubModule metadata'
+                : 'Filled from About/About.xml <description>'}
               class="path-input w-full"
             ></textarea>
             <div class="mt-2">
@@ -1662,7 +1853,7 @@
             {/if}
 
             <button
-              onclick={oneClickRimWorldUpload}
+              onclick={oneClickUpload}
               disabled={isUploading || isDetectingMod || isPackaging}
               class="btn-primary py-4 text-[15px]"
             >
@@ -1678,7 +1869,7 @@
               {:else if isDetectingMod}
                 Scanning mod…
               {:else}
-                ↑ One-click RimWorld upload / update
+                ↑ One-click {gameLabel} upload / update
               {/if}
             </button>
 

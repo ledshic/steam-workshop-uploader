@@ -8,6 +8,7 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 
 mod app_icon;
+mod bannerlord;
 mod rimworld;
 
 #[cfg(feature = "steamworks-sdk")]
@@ -565,6 +566,33 @@ fn rimworld_app_id() -> u32 {
     rimworld::RIMWORLD_APP_ID
 }
 
+/// Detect Bannerlord module metadata from SubModule.xml / out/_Module layouts.
+#[tauri::command]
+fn detect_bannerlord_mod(path: String) -> Result<bannerlord::BannerlordModInfo, String> {
+    bannerlord::detect_bannerlord_mod(path)
+}
+
+/// Prepare a clean Bannerlord module package for Workshop upload.
+#[tauri::command]
+fn prepare_bannerlord_package(
+    req: bannerlord::PreparePackageRequest,
+) -> Result<bannerlord::BannerlordModInfo, String> {
+    bannerlord::prepare_bannerlord_package(req)
+}
+
+/// Persist WorkshopItemId.txt after a successful first upload.
+#[tauri::command]
+fn write_bannerlord_published_file_id(
+    req: bannerlord::WritePublishedFileIdRequest,
+) -> Result<String, String> {
+    bannerlord::write_published_file_id(req)
+}
+
+#[tauri::command]
+fn bannerlord_app_id() -> u32 {
+    bannerlord::BANNERLORD_APP_ID
+}
+
 /// Set Dock / window icon theme: `light` | `dark` | `system`.
 /// Returns the resolved theme actually applied (`light` or `dark`).
 #[tauri::command]
@@ -602,6 +630,10 @@ pub fn run() {
             prepare_rimworld_package,
             write_rimworld_published_file_id,
             rimworld_app_id,
+            detect_bannerlord_mod,
+            prepare_bannerlord_package,
+            write_bannerlord_published_file_id,
+            bannerlord_app_id,
             set_app_icon_theme,
             is_system_dark_mode,
             #[cfg(feature = "steamworks-sdk")]

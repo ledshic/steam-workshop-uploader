@@ -125,7 +125,10 @@
   const ITEM_ID_HISTORY_MAX = 30;
   const CLEAN_PACKAGE_KEY = 'modCleanPackage';
   const ICON_THEME_KEY = 'appIconTheme';
+  const UI_MODE_KEY = 'uiMode';
   type IconThemePref = 'light' | 'dark' | 'system';
+  /** Current full form is Advanced; Easy is a simplified one-click flow. */
+  type UiMode = 'easy' | 'advanced';
   const STEAM_LANGUAGE_OPTIONS = [
     { code: 'english', label: 'English' },
     { code: 'schinese', label: 'Simplified Chinese' },
@@ -196,6 +199,8 @@
   /** Dock / window icon: light (default), dark, or follow OS. */
   let iconTheme = $state<IconThemePref>('light');
   let resolvedIconTheme = $state<'light' | 'dark'>('light');
+  /** Default Advanced = full current UI. */
+  let uiMode = $state<UiMode>('advanced');
 
   let unlistenLog: UnlistenFn | null = null;
   let unlistenComplete: UnlistenFn | null = null;
@@ -803,6 +808,15 @@
     }
   }
 
+  function setUiMode(mode: UiMode) {
+    uiMode = mode;
+    localStorage.setItem(UI_MODE_KEY, mode);
+    // Easy always uses clean temp packages for safer one-click uploads.
+    if (mode === 'easy') {
+      cleanPackage = true;
+    }
+  }
+
   /** One-click: pick folder if needed → detect → temp package → upload/update. */
   async function oneClickUpload() {
     if (isUploading || isDetectingMod || isPackaging) return;
@@ -825,7 +839,9 @@
       path = modRootPath || path;
     }
 
-    if (cleanPackage) {
+    // Easy mode always packages; Advanced honors the checkbox.
+    const shouldPackage = uiMode === 'easy' || cleanPackage;
+    if (shouldPackage) {
       const packaged = await generateTempPackage({ openAfter: false });
       if (!packaged) return;
     } else if (!item.title.trim() || !item.contentFolder.trim()) {
@@ -1142,6 +1158,11 @@
     if (savedIcon === 'light' || savedIcon === 'dark' || savedIcon === 'system') {
       iconTheme = savedIcon;
     }
+    const savedUi = localStorage.getItem(UI_MODE_KEY);
+    if (savedUi === 'easy' || savedUi === 'advanced') {
+      uiMode = savedUi;
+      if (savedUi === 'easy') cleanPackage = true;
+    }
     if (!APP_PRESETS.some(p => p.id === item.appId)) {
       item.appId = RIMWORLD_APP_ID;
     }
@@ -1232,6 +1253,18 @@
           ready
         </div>
       {/if}
+      <div class="segmented text-xs">
+        <button
+          type="button"
+          class:active={uiMode === 'easy'}
+          onclick={() => setUiMode('easy')}>Easy</button
+        >
+        <button
+          type="button"
+          class:active={uiMode === 'advanced'}
+          onclick={() => setUiMode('advanced')}>Advanced</button
+        >
+      </div>
       <button
         onclick={() => (showSettings = true)}
         class="btn-secondary text-xs">Settings</button
@@ -1241,6 +1274,173 @@
   </nav>
 
   <div class="flex-1 min-h-0 overflow-y-auto">
+    {#if uiMode === 'easy'}
+      <!-- ========== EASY MODE ========== -->
+      <div class="max-w-xl mx-auto w-full p-6 space-y-5">
+        <div class="text-center space-y-1 pt-2">
+          <h1 class="text-xl font-semibold tracking-tight">Quick upload</h1>
+          <p class="text-sm text-zinc-500">
+            Pick a game, drop your mod folder, upload. Metadata is filled
+            automatically.
+          </p>
+        </div>
+
+        <!-- Game pills -->
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-4">
+          <div class="text-xs font-semibold text-zinc-500 tracking-wider mb-2.5">
+            GAME
+          </div>
+          <div class="flex flex-wrap gap-2">
+            {#each APP_PRESETS as preset}
+              <button
+                type="button"
+                class="preset-pill {Number(item.appId) === preset.id
+                  ? 'active'
+                  : ''}"
+                onclick={() => setPreset(preset.id)}>{preset.name}</button
+              >
+            {/each}
+          </div>
+        </div>
+
+        <!-- Drop zone -->
+        <div
+          role="region"
+          aria-label="Mod folder drop zone"
+          class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 {isDragging
+            ? 'ring-2 ring-blue-500 border-blue-500/60'
+            : ''}"
+          ondragover={e => {
+            e.preventDefault();
+            isDragging = true;
+          }}
+          ondragleave={() => (isDragging = false)}
+          ondrop={e => {
+            e.preventDefault();
+            handleDrop(e);
+          }}
+        >
+          <button
+            type="button"
+            onclick={selectContentFolder}
+            disabled={isDetectingMod || isPackaging}
+            class="group w-full border border-dashed border-zinc-700 hover:border-zinc-500 rounded-2xl p-8 flex flex-col items-center justify-center cursor-pointer transition-all bg-zinc-950/60 hover:bg-zinc-950 disabled:opacity-60"
+          >
+            {#if isDetectingMod}
+              <span
+                class="w-8 h-8 border-2 border-zinc-500 border-t-zinc-200 rounded-full animate-spin mb-3"
+              ></span>
+              <div class="font-medium text-sm">Scanning…</div>
+            {:else}
+              <div
+                class="w-12 h-12 rounded-2xl bg-zinc-800 group-hover:bg-zinc-700 flex items-center justify-center mb-3"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  class="w-6 h-6 text-zinc-400"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  ><path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
+                  /></svg
+                >
+              </div>
+              <div class="font-medium text-sm">
+                Drop {gameLabel} folder or click to browse
+              </div>
+              <div class="text-xs text-zinc-500 mt-1.5 text-center max-w-xs">
+                {activeGame === 'bannerlord'
+                  ? 'Uses SubModule.xml · prefers out/ModuleId'
+                  : 'Uses About/About.xml · Preview · PublishedFileId'}
+              </div>
+            {/if}
+          </button>
+
+          {#if item.title || modRootPath || item.contentFolder}
+            <div
+              class="mt-4 rounded-xl border border-zinc-800 bg-zinc-950/70 p-3.5 space-y-2 text-sm"
+            >
+              <div class="flex justify-between gap-3">
+                <span class="text-zinc-500">Title</span>
+                <span class="text-zinc-200 truncate max-w-[16rem] text-right font-medium"
+                  >{item.title || '—'}</span
+                >
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-zinc-500">Action</span>
+                <span class="text-zinc-300">
+                  {getPublishedFileIdFromInput()
+                    ? `Update #${getPublishedFileIdFromInput()}`
+                    : 'New upload'}
+                </span>
+              </div>
+              {#if item.contentFolder}
+                <div
+                  class="text-[11px] font-mono text-emerald-400/90 truncate pt-1 border-t border-zinc-800"
+                  title={item.contentFolder}
+                >
+                  {item.contentFolder}
+                </div>
+              {/if}
+              {#if (rimworldInfo?.warnings.length || bannerlordInfo?.warnings.length || 0) > 0}
+                <div class="text-[11px] text-amber-400/90 space-y-0.5 pt-1">
+                  {#each (rimworldInfo?.warnings || bannerlordInfo?.warnings || []).slice(0, 3) as warning}
+                    <div>· {warning}</div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/if}
+        </div>
+
+        <button
+          type="button"
+          onclick={oneClickUpload}
+          disabled={isUploading || isDetectingMod || isPackaging}
+          class="btn-primary py-4 text-[15px]"
+        >
+          {#if isUploading}
+            <span class="inline-flex items-center gap-2">
+              <span
+                class="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin"
+              ></span>
+              Uploading…
+            </span>
+          {:else if isPackaging}
+            Packaging…
+          {:else if isDetectingMod}
+            Scanning…
+          {:else}
+            ↑ Upload / update {gameLabel} mod
+          {/if}
+        </button>
+
+        {#if lastResult}
+          <div
+            class="rounded-2xl px-4 py-3 text-sm font-medium border {uploadStatus ===
+            'success'
+              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+              : 'bg-red-500/10 border-red-500/30 text-red-400'}"
+          >
+            {lastResult}
+          </div>
+        {/if}
+
+        <p class="text-center text-[11px] text-zinc-600 pb-4">
+          Need logs, tags, visibility, steamcmd, or partial updates?
+          <button
+            type="button"
+            class="text-blue-400 hover:text-blue-300 underline-offset-2 hover:underline"
+            onclick={() => setUiMode('advanced')}>Switch to Advanced</button
+          >
+        </p>
+      </div>
+    {:else}
+    <!-- ========== ADVANCED MODE (full form) ========== -->
     <!-- Modern two-column layout -->
     <div class="flex gap-6 p-6 max-w-360 mx-auto w-full">
       <!-- Form Column -->
@@ -2006,6 +2206,7 @@
         </div>
       </div>
     </div>
+    {/if}
   </div>
 </div>
 
@@ -2027,6 +2228,27 @@
       class="relative pointer-events-auto w-full max-w-md bg-zinc-900 border border-zinc-700 rounded-3xl p-7"
     >
       <div id="settings-title" class="text-xl font-semibold mb-5">Settings</div>
+
+      <div class="mb-6">
+        <div class="block text-sm text-zinc-400 mb-1.5">UI mode</div>
+        <div class="segmented w-full">
+          <button
+            type="button"
+            onclick={() => setUiMode('easy')}
+            class:active={uiMode === 'easy'}>Easy</button
+          >
+          <button
+            type="button"
+            onclick={() => setUiMode('advanced')}
+            class:active={uiMode === 'advanced'}>Advanced</button
+          >
+        </div>
+        <div class="mt-2 text-xs text-zinc-500">
+          {uiMode === 'easy'
+            ? 'Simplified one-click flow: game → folder → upload (no console).'
+            : 'Full form: console logs, tags, visibility, steamcmd, partial updates, VDF.'}
+        </div>
+      </div>
 
       <div class="mb-6">
         <div class="block text-sm text-zinc-400 mb-1.5">App icon</div>

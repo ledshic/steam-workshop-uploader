@@ -29,6 +29,19 @@ pub struct WorkshopItem {
     pub change_note: Option<String>,
     pub visibility: u8,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub localized_descriptions: Vec<LocalizedDescription>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalizedDescription {
+    /// Locale suffix used by the source file, for example `zh-CN`.
+    pub locale: String,
+    /// Steam language API code, for example `schinese`.
+    pub language: String,
+    pub description: String,
+    pub source_path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -37,6 +50,10 @@ pub struct UploadResult {
     pub published_file_id: u64,
     pub needs_legal_agreement: bool,
     pub method: String,
+    #[serde(default)]
+    pub localized_languages: Vec<String>,
+    #[serde(default)]
+    pub localization_errors: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

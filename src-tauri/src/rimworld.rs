@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::LocalizedDescription;
+
 /// RimWorld Steam AppID.
 pub const RIMWORLD_APP_ID: u32 = 294100;
 
@@ -63,6 +65,8 @@ pub struct RimWorldModInfo {
     pub about_xml_path: String,
     pub name: String,
     pub description: String,
+    /// Extra Workshop descriptions discovered from About/About.<locale>.xml.
+    pub localized_descriptions: Vec<LocalizedDescription>,
     pub author: Option<String>,
     pub package_id: Option<String>,
     pub url: Option<String>,
@@ -138,6 +142,9 @@ pub fn detect_rimworld_mod(path: String) -> Result<RimWorldModInfo, String> {
 
     let mut warnings = Vec::new();
     let mut detected_files = vec![about_xml.display().to_string()];
+
+    let localized_descriptions =
+        find_localized_descriptions(&about_dir, &mut warnings, &mut detected_files);
 
     if description.is_empty() {
         warnings.push(
@@ -248,6 +255,7 @@ pub fn detect_rimworld_mod(path: String) -> Result<RimWorldModInfo, String> {
         about_xml_path: about_xml_str,
         name,
         description,
+        localized_descriptions,
         author,
         package_id,
         url,
@@ -264,6 +272,136 @@ pub fn detect_rimworld_mod(path: String) -> Result<RimWorldModInfo, String> {
         detected_files,
         is_packaged: false,
     })
+}
+
+/// Discover the EasyRim-style `About.<locale>.xml` files and convert their
+/// locale suffixes to the language identifiers expected by Steamworks.
+fn find_localized_descriptions(
+    about_dir: &Path,
+    warnings: &mut Vec<String>,
+    detected_files: &mut Vec<String>,
+) -> Vec<LocalizedDescription> {
+    let Ok(entries) = fs::read_dir(about_dir) else {
+        return Vec::new();
+    };
+
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                return false;
+            };
+            let lower = name.to_ascii_lowercase();
+            lower.starts_with("about.") && lower.ends_with(".xml") && lower != "about.xml"
+        })
+        .collect();
+    paths.sort_by_key(|path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default()
+    });
+
+    let mut result = Vec::new();
+    let mut seen_languages: Vec<String> = Vec::new();
+    for path in paths {
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let locale = &file_name["About.".len()..file_name.len() - ".xml".len()];
+        let Some(language) = steam_language_for_locale(locale) else {
+            warnings.push(format!(
+                "Ignoring localized description '{}': locale '{}' is not supported by Steam.",
+                file_name, locale
+            ));
+            continue;
+        };
+        if language == "english" {
+            warnings.push(format!(
+                "Ignoring '{}': About.xml is already used as the English Workshop description.",
+                file_name
+            ));
+            continue;
+        }
+        if seen_languages.iter().any(|seen| seen == language) {
+            warnings.push(format!(
+                "Ignoring duplicate Steam language '{}' from '{}'.",
+                language, file_name
+            ));
+            continue;
+        }
+
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                warnings.push(format!("Could not read '{}': {}", file_name, err));
+                continue;
+            }
+        };
+        let raw = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
+        let description = extract_xml_text(raw, "description")
+            .map(|text| decode_xml_entities(&text).trim().to_string())
+            .unwrap_or_default();
+        if description.is_empty() {
+            warnings.push(format!(
+                "Ignoring '{}': localized <description> is missing or empty.",
+                file_name
+            ));
+            continue;
+        }
+
+        seen_languages.push(language.to_string());
+        detected_files.push(path.display().to_string());
+        result.push(LocalizedDescription {
+            locale: locale.to_string(),
+            language: language.to_string(),
+            description,
+            source_path: canonicalize_path(&path)
+                .unwrap_or_else(|_| path.to_string_lossy().to_string()),
+        });
+    }
+    result
+}
+
+fn steam_language_for_locale(locale: &str) -> Option<&'static str> {
+    let normalized = locale.trim().replace('_', "-").to_ascii_lowercase();
+    let language = normalized.split('-').next().unwrap_or("");
+    match normalized.as_str() {
+        "zh-cn" | "zh-sg" | "zh-hans" => Some("schinese"),
+        "zh-tw" | "zh-hk" | "zh-mo" | "zh-hant" => Some("tchinese"),
+        "pt-br" => Some("brazilian"),
+        "es-419" | "es-mx" | "es-ar" | "es-cl" | "es-co" | "es-pe" => Some("latam"),
+        _ => match language {
+            "ar" => Some("arabic"),
+            "bg" => Some("bulgarian"),
+            "cs" => Some("czech"),
+            "da" => Some("danish"),
+            "de" => Some("german"),
+            "el" => Some("greek"),
+            "en" => Some("english"),
+            "es" => Some("spanish"),
+            "fi" => Some("finnish"),
+            "fr" => Some("french"),
+            "hu" => Some("hungarian"),
+            "id" => Some("indonesian"),
+            "it" => Some("italian"),
+            "ja" => Some("japanese"),
+            "ko" => Some("koreana"),
+            "nl" => Some("dutch"),
+            "no" | "nb" | "nn" => Some("norwegian"),
+            "pl" => Some("polish"),
+            "pt" => Some("portuguese"),
+            "ro" => Some("romanian"),
+            "ru" => Some("russian"),
+            "sv" => Some("swedish"),
+            "th" => Some("thai"),
+            "tr" => Some("turkish"),
+            "uk" => Some("ukrainian"),
+            "vi" => Some("vietnamese"),
+            _ => None,
+        },
+    }
 }
 
 /// Copy a RimWorld mod into a clean temporary package, excluding Source / VCS / build artifacts.
@@ -742,6 +880,16 @@ Line 2</description>
         );
         assert_eq!(extract_list_items(xml, "supportedVersions"), vec!["1.5", "1.6"]);
     }
+
+    #[test]
+    fn maps_locales_to_steam_languages() {
+        assert_eq!(steam_language_for_locale("zh-CN"), Some("schinese"));
+        assert_eq!(steam_language_for_locale("zh_TW"), Some("tchinese"));
+        assert_eq!(steam_language_for_locale("pt-BR"), Some("brazilian"));
+        assert_eq!(steam_language_for_locale("es-419"), Some("latam"));
+        assert_eq!(steam_language_for_locale("ko-KR"), Some("koreana"));
+        assert_eq!(steam_language_for_locale("xx-YY"), None);
+    }
 }
 
 #[cfg(test)]
@@ -767,6 +915,13 @@ mod live_tests {
         assert!(!info.description.is_empty());
         assert!(info.preview_file.is_some());
         assert_eq!(info.tags[0], "Mod");
+        if path.join("About/About.zh-CN.xml").is_file() {
+            assert!(info.localized_descriptions.iter().any(|localized| {
+                localized.locale == "zh-CN"
+                    && localized.language == "schinese"
+                    && !localized.description.is_empty()
+            }));
+        }
     }
 
     #[test]
@@ -781,6 +936,13 @@ mod live_tests {
         assert!(info.is_packaged);
         let pkg = PathBuf::from(&info.content_folder);
         assert!(pkg.join("About/About.xml").is_file());
+        if path.join("About/About.zh-CN.xml").is_file() {
+            assert!(pkg.join("About/About.zh-CN.xml").is_file());
+            assert!(info
+                .localized_descriptions
+                .iter()
+                .any(|localized| localized.language == "schinese"));
+        }
         // Dev / decompile / game mounts must never land in the package.
         assert!(!pkg.join("Source").exists());
         assert!(!pkg.join("RimWorld-Data").exists());

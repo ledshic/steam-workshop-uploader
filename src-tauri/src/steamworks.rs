@@ -296,6 +296,7 @@ fn upload_item_via_steamworks_inner(
 
     let mut update = ugc
         .start_item_update(app_id, published_file_id)
+        .language("english")
         .title(&item.title)
         .description(&item.description)
         .content_path(Path::new(&item.content_folder))
@@ -340,6 +341,47 @@ fn upload_item_via_steamworks_inner(
         )?;
     needs_legal_agreement = needs_legal_agreement || submit_needs_legal_agreement;
 
+    let mut localized_languages = Vec::new();
+    let mut localization_errors = Vec::new();
+    if !item.localized_descriptions.is_empty() {
+        emit_log(
+            &app,
+            &format!(
+                "English upload completed; updating {} localized description(s)...",
+                item.localized_descriptions.len()
+            ),
+            "info",
+        );
+    }
+    for localized in &item.localized_descriptions {
+        let context = format!("{} ({})", localized.locale, localized.language);
+        emit_log(
+            &app,
+            &format!("Submitting localized description: {}", context),
+            "info",
+        );
+        let localized_update = ugc
+            .start_item_update(app_id, final_id)
+            .language(&localized.language)
+            .description(&localized.description);
+        match submit_update_and_wait(&client, &app, localized_update, None) {
+            Ok((_, needs_agreement)) => {
+                needs_legal_agreement = needs_legal_agreement || needs_agreement;
+                localized_languages.push(localized.language.clone());
+                emit_log(
+                    &app,
+                    &format!("Localized description updated: {}", context),
+                    "info",
+                );
+            }
+            Err(err) => {
+                let message = format!("Localized description failed for {}: {}", context, err);
+                emit_log(&app, &message, "stderr");
+                localization_errors.push(message);
+            }
+        }
+    }
+
     if needs_legal_agreement {
         emit_log(
             &app,
@@ -363,7 +405,9 @@ fn upload_item_via_steamworks_inner(
             "code": 0,
             "method": "sdk",
             "publishedFileId": final_id.0,
-            "needsLegalAgreement": needs_legal_agreement
+            "needsLegalAgreement": needs_legal_agreement,
+            "localizedLanguages": localized_languages.clone(),
+            "localizationErrors": localization_errors.clone()
         }),
     );
 
@@ -371,6 +415,8 @@ fn upload_item_via_steamworks_inner(
         published_file_id: final_id.0,
         needs_legal_agreement,
         method: "sdk".to_string(),
+        localized_languages,
+        localization_errors,
     })
 }
 
@@ -442,6 +488,8 @@ fn update_item_description_via_steamworks_inner(
         published_file_id: final_id.0,
         needs_legal_agreement,
         method: "sdk".to_string(),
+        localized_languages: Vec::new(),
+        localization_errors: Vec::new(),
     })
 }
 
@@ -505,6 +553,8 @@ fn update_item_preview_via_steamworks_inner(
         published_file_id: final_id.0,
         needs_legal_agreement,
         method: "sdk".to_string(),
+        localized_languages: Vec::new(),
+        localization_errors: Vec::new(),
     })
 }
 
@@ -690,6 +740,26 @@ fn validate_item(item: &mut WorkshopItem) -> Result<(), String> {
         .collect();
     for tag in &item.tags {
         reject_nul("tag", tag)?;
+    }
+
+    for localized in &mut item.localized_descriptions {
+        localized.locale = localized.locale.trim().to_string();
+        localized.language = localized.language.trim().to_ascii_lowercase();
+        localized.description = localized.description.trim().to_string();
+        if localized.locale.is_empty() || localized.language.is_empty() {
+            return Err(
+                "Localized descriptions require a locale and Steam language code".to_string(),
+            );
+        }
+        if localized.language == "english" {
+            return Err(
+                "English must use the primary About/About.xml description, not a localized description"
+                    .to_string(),
+            );
+        }
+        reject_nul("localized locale", &localized.locale)?;
+        reject_nul("localized language", &localized.language)?;
+        reject_nul("localized description", &localized.description)?;
     }
 
     Ok(())

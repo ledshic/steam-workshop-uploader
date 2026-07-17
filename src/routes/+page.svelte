@@ -15,6 +15,14 @@
     changeNote?: string;
     visibility: 0 | 1 | 2;
     tags: string[];
+    localizedDescriptions: LocalizedDescription[];
+  }
+
+  interface LocalizedDescription {
+    locale: string;
+    language: string;
+    description: string;
+    sourcePath: string;
   }
 
   interface LogEntry {
@@ -27,6 +35,8 @@
     publishedFileId: number;
     needsLegalAgreement: boolean;
     method: UploadMethod;
+    localizedLanguages: string[];
+    localizationErrors: string[];
   }
 
   interface DescriptionUpdatePayload {
@@ -74,6 +84,7 @@
     aboutXmlPath: string;
     name: string;
     description: string;
+    localizedDescriptions: LocalizedDescription[];
     author?: string;
     packageId?: string;
     url?: string;
@@ -158,6 +169,7 @@
     changeNote: '',
     visibility: 0,
     tags: ['Mod'],
+    localizedDescriptions: [],
   });
 
   let steamcmdPath = $state('');
@@ -324,6 +336,7 @@
     item.contentFolder = info.contentFolder;
     item.title = info.name;
     item.description = info.description;
+    item.localizedDescriptions = [...info.localizedDescriptions];
     item.previewFile = info.previewFile || '';
     item.tags = info.tags.length > 0 ? [...info.tags] : ['Mod'];
 
@@ -351,6 +364,14 @@
         (info.isPackaged ? ' [temp package]' : ''),
       'info',
     );
+    if (info.localizedDescriptions.length > 0) {
+      addLog(
+        `[RimWorld] Localized Workshop descriptions: ${info.localizedDescriptions
+          .map(localized => `${localized.locale} → ${localized.language}`)
+          .join(', ')}`,
+        'info',
+      );
+    }
   }
 
   function applyBannerlordInfo(
@@ -364,6 +385,7 @@
     item.contentFolder = info.contentFolder;
     item.title = info.name;
     item.description = info.description;
+    item.localizedDescriptions = [];
     item.previewFile = info.previewFile || '';
     item.tags = info.tags.length > 0 ? [...info.tags] : ['Mod', 'Utility'];
     if (info.version && !item.changeNote) {
@@ -538,6 +560,7 @@
 
   function setPreset(appId: number) {
     item.appId = appId || RIMWORLD_APP_ID;
+    item.localizedDescriptions = [];
     // Clear game-specific detection when switching presets
     rimworldInfo = null;
     bannerlordInfo = null;
@@ -646,6 +669,10 @@
       changeNote: item.changeNote || undefined,
       visibility: item.visibility,
       tags: item.tags,
+      localizedDescriptions:
+        uploadMethod === 'sdk' && activeGame === 'rimworld'
+          ? item.localizedDescriptions
+          : [],
     };
   }
 
@@ -791,6 +818,12 @@
       lastResult = result.needsLegalAgreement
         ? `SDK upload completed. PublishedFileID: ${result.publishedFileId}. Accept the Workshop legal agreement in Steam.`
         : `SDK upload completed. PublishedFileID: ${result.publishedFileId}`;
+      if (result.localizedLanguages.length > 0) {
+        lastResult += ` Localized descriptions updated: ${result.localizedLanguages.join(', ')}.`;
+      }
+      if (result.localizationErrors.length > 0) {
+        lastResult += ` ${result.localizationErrors.length} localized update(s) failed; see logs.`;
+      }
     } catch (err: any) {
       isUploading = false;
       uploadStatus = 'error';
@@ -1086,6 +1119,7 @@
       changeNote: '',
       visibility: 0,
       tags: ['Mod'],
+      localizedDescriptions: [],
     };
     publishedFileIdInput = '';
     generatedVdf = '';

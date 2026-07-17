@@ -18,6 +18,7 @@ A cross-platform desktop app (Windows / macOS / Linux) built with **Tauri v2 + R
   - Workshop id from `WorkshopItemId.txt` or `WorkshopUpdate.xml` ItemId
 - **Temp upload package** + open in system file manager
 - **One-click upload / update**
+- **Automatic localized descriptions** (SDK) — uploads `About/About.xml` as English, then applies each `About/About.<locale>.xml` description (for example `About.zh-CN.xml` → Simplified Chinese)
 - **Easy / Advanced UI** (default Advanced) — Easy is game → drop folder → one-click upload
 - Light / dark / system Dock icons (Settings)
 - Live console, steamcmd fallback, description/preview-only updates
